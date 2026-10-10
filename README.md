@@ -123,5 +123,6 @@ make build
 make lint
 ```
 
-The release workflow is configured for manual dispatch and does not publish
-anything automatically.
+The release workflow runs a GoReleaser snapshot for pushes to `main`. To publish
+a GitHub release, push a version tag matching `v*`, such as `v1.0.0`; manual
+dispatch uses the same tag-aware behavior.
