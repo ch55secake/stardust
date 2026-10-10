@@ -13,9 +13,13 @@ import (
 const Version = "v1"
 
 type Handler struct {
-	collector      *metrics.Collector
+	collector      MetricsCollector
 	requestTimeout time.Duration
 	logger         *slog.Logger
+}
+
+type MetricsCollector interface {
+	Collect(context.Context) (metrics.Snapshot, error)
 }
 
 type HealthResponse struct {
@@ -40,7 +44,7 @@ type APIError struct {
 	Message string `json:"message"`
 }
 
-func NewHandler(collector *metrics.Collector, requestTimeout time.Duration, logger *slog.Logger) http.Handler {
+func NewHandler(collector MetricsCollector, requestTimeout time.Duration, logger *slog.Logger) http.Handler {
 	if requestTimeout <= 0 {
 		requestTimeout = 5 * time.Second
 	}
