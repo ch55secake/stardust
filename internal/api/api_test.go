@@ -1,18 +1,135 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/ch55secake/stardust/internal/metrics"
 )
 
+type fixtureCollector struct {
+	snapshot metrics.Snapshot
+	err      error
+	collect  func(context.Context) (metrics.Snapshot, error)
+}
+
+func (c fixtureCollector) Collect(ctx context.Context) (metrics.Snapshot, error) {
+	if c.collect != nil {
+		return c.collect(ctx)
+	}
+	return c.snapshot, c.err
+}
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func TestMetricsReturnsCompleteFixture(t *testing.T) {
+	want := metrics.Snapshot{
+		Hostname: "server-01",
+		OS: metrics.OSInfo{
+			Name:            "linux",
+			Platform:        "ubuntu",
+			PlatformVersion: "24.04",
+			KernelArch:      "x86_64",
+		},
+		CPU:    metrics.CPU{UsagePercent: 12.5, LogicalCores: 4},
+		Memory: metrics.Memory{UsedBytes: 1000, TotalBytes: 2000, UsedPercent: 50},
+		Disk:   metrics.Disk{Path: "/", UsedBytes: 1000, TotalBytes: 2000, UsedPercent: 50},
+		Uptime: 86400,
+		Network: metrics.Network{
+			BytesReceived:   1000,
+			BytesSent:       500,
+			PacketsReceived: 20,
+			PacketsSent:     10,
+		},
+	}
+	handler := NewHandler(fixtureCollector{snapshot: want}, time.Second, testLogger())
+	before := time.Now().UTC()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/metrics", nil)
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	assertJSONContentType(t, recorder)
+	var response MetricsResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.APIVersion != Version {
+		t.Fatalf("api version = %q, want %q", response.APIVersion, Version)
+	}
+	if response.Timestamp.Before(before) || response.Timestamp.After(time.Now().UTC()) {
+		t.Fatalf("timestamp = %s, want current UTC time", response.Timestamp)
+	}
+	if !reflect.DeepEqual(response.Data, want) {
+		t.Fatalf("data = %+v, want %+v", response.Data, want)
+	}
+}
+
+func TestMetricsReturnsAvailableDataAndErrors(t *testing.T) {
+	want := metrics.Snapshot{
+		Hostname: "server-01",
+		Errors: []metrics.MetricError{
+			{Metric: "disk", Message: "permission denied"},
+		},
+	}
+	handler := NewHandler(fixtureCollector{snapshot: want}, time.Second, testLogger())
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/metrics", nil)
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	var response MetricsResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Data.Hostname != want.Hostname {
+		t.Fatalf("hostname = %q, want %q", response.Data.Hostname, want.Hostname)
+	}
+	if len(response.Data.Errors) != 1 || response.Data.Errors[0] != want.Errors[0] {
+		t.Fatalf("errors = %+v, want %+v", response.Data.Errors, want.Errors)
+	}
+}
+
+func TestMetricsTimeoutUsesErrorSchema(t *testing.T) {
+	handler := NewHandler(fixtureCollector{collect: func(ctx context.Context) (metrics.Snapshot, error) {
+		<-ctx.Done()
+		return metrics.Snapshot{}, ctx.Err()
+	}}, 10*time.Millisecond, testLogger())
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/metrics", nil)
+
+	handler.ServeHTTP(recorder, request)
+
+	assertErrorResponse(t, recorder, http.StatusServiceUnavailable, "metrics_unavailable")
+}
+
+func TestMetricsCollectionErrorUsesErrorSchema(t *testing.T) {
+	handler := NewHandler(fixtureCollector{err: context.Canceled}, time.Second, testLogger())
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/metrics", nil)
+
+	handler.ServeHTTP(recorder, request)
+
+	assertErrorResponse(t, recorder, http.StatusServiceUnavailable, "metrics_unavailable")
+}
+
 func TestHealth(t *testing.T) {
-	handler := NewHandler(metrics.NewCollector(time.Second, "/"), time.Second, slog.Default())
+	handler := NewHandler(fixtureCollector{}, time.Second, testLogger())
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
 
@@ -21,6 +138,7 @@ func TestHealth(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
 	}
+	assertJSONContentType(t, recorder)
 	var response HealthResponse
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -30,21 +148,51 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestUnsupportedMethodsUseErrorSchema(t *testing.T) {
+	handler := NewHandler(fixtureCollector{}, time.Second, testLogger())
+	for _, path := range []string{"/api/v1/health", "/api/v1/metrics"} {
+		t.Run(path, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, path, nil)
+
+			handler.ServeHTTP(recorder, request)
+
+			assertErrorResponse(t, recorder, http.StatusMethodNotAllowed, "method_not_allowed")
+		})
+	}
+}
+
 func TestUnknownEndpointUsesErrorSchema(t *testing.T) {
-	handler := NewHandler(metrics.NewCollector(time.Second, "/"), time.Second, slog.Default())
+	handler := NewHandler(fixtureCollector{}, time.Second, testLogger())
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/unknown", nil)
 
 	handler.ServeHTTP(recorder, request)
 
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
+	assertErrorResponse(t, recorder, http.StatusNotFound, "not_found")
+}
+
+func assertJSONContentType(t *testing.T, recorder *httptest.ResponseRecorder) {
+	t.Helper()
+	if got, want := recorder.Header().Get("Content-Type"), "application/json; charset=utf-8"; got != want {
+		t.Fatalf("content type = %q, want %q", got, want)
 	}
+}
+
+func assertErrorResponse(t *testing.T, recorder *httptest.ResponseRecorder, wantStatus int, wantCode string) {
+	t.Helper()
+	if recorder.Code != wantStatus {
+		t.Fatalf("status = %d, want %d", recorder.Code, wantStatus)
+	}
+	assertJSONContentType(t, recorder)
 	var response ErrorResponse
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if response.Error.Code != "not_found" {
-		t.Fatalf("error code = %q, want not_found", response.Error.Code)
+	if response.APIVersion != Version {
+		t.Fatalf("api version = %q, want %q", response.APIVersion, Version)
+	}
+	if response.Error.Code != wantCode {
+		t.Fatalf("error code = %q, want %q", response.Error.Code, wantCode)
 	}
 }
