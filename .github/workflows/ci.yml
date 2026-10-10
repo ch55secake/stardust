@@ -1,4 +1,4 @@
-name: CI
+name: ci
 
 on:
   push:
@@ -8,21 +8,22 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build and test
+  build-and-test:
+    name: build-and-test
     uses: ch55secake/cheesecake-factory/.github/workflows/go-build.yml@ad918beeae2a690d153e1153fadb8e1d82a3ee02
     with:
       build-command: go build ./cmd/stardust
       test-command: go test ./...
 
   lint:
-    name: Lint
+    name: lint
     uses: ch55secake/cheesecake-factory/.github/workflows/go-lint.yml@ad918beeae2a690d153e1153fadb8e1d82a3ee02
     with:
       golangci-lint-version: v2.14.0
 
-  vulnerability:
-    name: Vulnerability scan
+  vulnerability-scan:
+    name: vulnerability-scan
     uses: ch55secake/cheesecake-factory/.github/workflows/go-vuln.yml@ad918beeae2a690d153e1153fadb8e1d82a3ee02
     with:
       go-package: ./...
+      go-version-input: '1.26.9'
