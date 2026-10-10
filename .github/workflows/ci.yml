@@ -26,3 +26,4 @@ jobs:
     uses: ch55secake/cheesecake-factory/.github/workflows/go-vuln.yml@ad918beeae2a690d153e1153fadb8e1d82a3ee02
     with:
       go-package: ./...
+      go-version-input: '1.26.9'
