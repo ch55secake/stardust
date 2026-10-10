@@ -8,28 +8,21 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v5
+  build:
+    name: Build and test
+    uses: ch55secake/cheesecake-factory/.github/workflows/go-build.yml@ad918beeae2a690d153e1153fadb8e1d82a3ee02
+    with:
+      build-command: go build ./cmd/stardust
+      test-command: go test ./...
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
+  lint:
+    name: Lint
+    uses: ch55secake/cheesecake-factory/.github/workflows/go-lint.yml@ad918beeae2a690d153e1153fadb8e1d82a3ee02
+    with:
+      golangci-lint-version: v2.14.0
 
-      - name: Check formatting
-        run: test -z "$(gofmt -l .)"
-
-      - name: Test
-        run: go test ./...
-
-      - name: Build
-        run: go build ./cmd/stardust
-
-      - name: Lint
-        uses: golangci/golangci-lint-action@v8
-        with:
-          version: v2.14.0
+  vulnerability:
+    name: Vulnerability scan
+    uses: ch55secake/cheesecake-factory/.github/workflows/go-vuln.yml@ad918beeae2a690d153e1153fadb8e1d82a3ee02
+    with:
+      go-package: ./...

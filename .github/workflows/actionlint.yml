@@ -1,0 +1,29 @@
+name: Actionlint
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/**
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: actionlint-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: Validate workflows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run actionlint
+        uses: raven-actions/actionlint@v2
