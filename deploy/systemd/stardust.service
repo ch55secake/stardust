@@ -1,0 +1,30 @@
+[Unit]
+Description=Stardust telemetry agent
+After=network.target
+
+[Service]
+Type=simple
+User=stardust
+Group=stardust
+ExecStart=/usr/local/bin/stardust --listen 127.0.0.1:8787
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/run/stardust
+
+[Install]
+WantedBy=multi-user.target

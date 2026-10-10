@@ -1,0 +1,30 @@
+version: 2
+
+project_name: stardust
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: stardust
+    main: ./cmd/stardust
+    binary: stardust
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats: [tar.gz]
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  prerelease: auto
