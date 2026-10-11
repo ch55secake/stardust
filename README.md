@@ -186,6 +186,17 @@ sudo launchctl print system/com.ch55secake.stardust
 sudo launchctl bootout system/com.ch55secake.stardust
 ```
 
+To change the listener port, update the third argument in the plist and reload
+the service (this example uses port `28787`):
+
+```sh
+sudo /usr/libexec/PlistBuddy \
+  -c 'Set :ProgramArguments:2 127.0.0.1:28787' \
+  /Library/LaunchDaemons/com.ch55secake.stardust.plist
+sudo launchctl bootout system/com.ch55secake.stardust
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.ch55secake.stardust.plist
+```
+
 For binary-only installation, use `--no-service` and manage the process with
 your own supervisor.
 
