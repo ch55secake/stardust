@@ -46,3 +46,42 @@ jobs:
 
       - name: verify-systemd-deployment
         run: sudo bash deploy/systemd/test.sh
+
+  darwin-build:
+    name: darwin-build-${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+
+      - name: set-up-go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build-darwin
+        env:
+          CGO_ENABLED: '0'
+          GOARCH: ${{ matrix.arch }}
+          GOOS: darwin
+        run: go build ./cmd/stardust
+
+  launchd-plist:
+    name: launchd-plist
+    runs-on: macos-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+
+      - name: validate-launchd-plist
+        run: |
+          plutil -lint deploy/launchd/com.ch55secake.stardust.plist
+          cp deploy/launchd/com.ch55secake.stardust.plist "$RUNNER_TEMP/stardust.plist"
+          plutil -replace ProgramArguments.0 -string "$HOME/.local/bin/stardust" "$RUNNER_TEMP/stardust.plist"
+          plutil -replace StandardOutPath -string "$HOME/Library/Logs/Stardust/stdout.log" "$RUNNER_TEMP/stardust.plist"
+          plutil -replace StandardErrorPath -string "$HOME/Library/Logs/Stardust/stderr.log" "$RUNNER_TEMP/stardust.plist"
+          plutil -lint "$RUNNER_TEMP/stardust.plist"
