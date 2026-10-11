@@ -4,6 +4,12 @@
 <dict>
 	<key>Label</key>
 	<string>com.ch55secake.stardust</string>
+	<key>UserName</key>
+	<string>@STARDUST_USER@</string>
+	<key>GroupName</key>
+	<string>@STARDUST_GROUP@</string>
+	<key>InitGroups</key>
+	<true/>
 	<key>ProgramArguments</key>
 	<array>
 		<string>@STARDUST_BINARY_PATH@</string>
