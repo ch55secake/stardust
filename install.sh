@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo="ch55secake/stardust"
-install_dir="${STARDUST_INSTALL_DIR:-/usr/local/bin}"
+install_dir="${STARDUST_INSTALL_DIR:-}"
 version=""
 install_service=true
 
@@ -13,13 +13,14 @@ Install the latest Stardust release for Linux or macOS.
 Usage: install.sh [--install-dir DIR] [--version vX.Y.Z] [--no-service]
 
 Options:
-  --install-dir DIR  Install Stardust into DIR (default: /usr/local/bin)
+  --install-dir DIR  Install Stardust into DIR (Linux: /usr/local/bin,
+                     macOS: ~/.local/bin)
   --version VERSION  Install a specific release (default: latest)
-  --no-service       Install only the binary; do not create a systemd service
+  --no-service       Install only the binary; do not create a service
   -h, --help         Show this help
 
-The install directory can also be set with STARDUST_INSTALL_DIR. The systemd
-service requires root, systemd, and the default /usr/local/bin install path.
+The install directory can also be set with STARDUST_INSTALL_DIR. Linux systemd
+installs require root; macOS LaunchAgents run as the logged-in user.
 EOF
 }
 
@@ -55,19 +56,25 @@ while (($#)); do
 	esac
 done
 
-[[ -n "$install_dir" ]] || fail "install directory must not be empty"
 if [[ -n "$version" && ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 	fail "invalid version '$version' (expected vX.Y.Z)"
 fi
 
 case "$(uname -s)" in
-Linux) goos=linux ;;
+Linux)
+	goos=linux
+	service_manager=systemd
+	[[ -n "$install_dir" ]] || install_dir=/usr/local/bin
+	;;
 Darwin)
 	goos=darwin
-	install_service=false
+	service_manager=launchd
+	[[ -n "${HOME:-}" ]] || fail "HOME must be set for a macOS LaunchAgent"
+	[[ -n "$install_dir" ]] || install_dir="${HOME}/.local/bin"
 	;;
 *) fail "only Linux and macOS are supported" ;;
 esac
+[[ -n "$install_dir" ]] || fail "install directory must not be empty"
 
 case "$(uname -m)" in
 x86_64|amd64) arch=amd64 ;;
@@ -88,15 +95,24 @@ case "$goos" in
 esac
 
 if [[ "$install_service" == true ]]; then
-	case "$install_dir" in
-		/usr/local/bin|/usr/local/bin/) ;;
-		*) fail "the systemd unit uses /usr/local/bin; use --no-service for a custom install directory" ;;
-	esac
-	(( EUID == 0 )) || fail "systemd installation requires root; use sudo or pass --no-service"
-	for tool in systemctl systemd-analyze getent groupadd useradd; do
-		command -v "$tool" >/dev/null 2>&1 || fail "required command not found: $tool (or pass --no-service)"
-	done
-	systemctl show-environment >/dev/null 2>&1 || fail "systemd is not running; pass --no-service to install only the binary"
+	if [[ "$service_manager" == systemd ]]; then
+		case "$install_dir" in
+			/usr/local/bin|/usr/local/bin/) ;;
+			*) fail "the systemd unit uses /usr/local/bin; use --no-service for a custom install directory" ;;
+		esac
+		(( EUID == 0 )) || fail "systemd installation requires root; use sudo or pass --no-service"
+		for tool in systemctl systemd-analyze getent groupadd useradd; do
+			command -v "$tool" >/dev/null 2>&1 || fail "required command not found: $tool (or pass --no-service)"
+		done
+		systemctl show-environment >/dev/null 2>&1 || fail "systemd is not running; pass --no-service to install only the binary"
+	else
+		(( EUID != 0 )) || fail "macOS LaunchAgents must be installed as the logged-in user without sudo; use --no-service for a binary-only install"
+		for tool in launchctl plutil id; do
+			command -v "$tool" >/dev/null 2>&1 || fail "required command not found: $tool (or pass --no-service)"
+		done
+		launchd_domain="gui/$(id -u)"
+		launchctl print "$launchd_domain" >/dev/null 2>&1 || fail "no active macOS GUI login session; pass --no-service to install only the binary"
+	fi
 fi
 
 if [[ -n "$version" ]]; then
@@ -147,14 +163,30 @@ tar -xzf "$archive_path" -C "$tmp_dir" stardust || fail "could not extract Stard
 [[ -f "${tmp_dir}/stardust" ]] || fail "release archive did not contain the Stardust binary"
 
 if [[ "$install_service" == true ]]; then
-	unit_path="${tmp_dir}/stardust.service"
-	curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
-		--output "$unit_path" "https://raw.githubusercontent.com/${repo}/${release_tag}/deploy/systemd/stardust.service" || fail "could not download the systemd unit for ${release_tag}"
-	if ! getent group stardust >/dev/null; then
-		groupadd --system stardust || fail "could not create the stardust service group"
-	fi
-	if ! getent passwd stardust >/dev/null; then
-		useradd --system --gid stardust --no-create-home --shell /usr/sbin/nologin stardust || fail "could not create the stardust service user"
+	if [[ "$service_manager" == systemd ]]; then
+		unit_path="${tmp_dir}/stardust.service"
+		curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+			--output "$unit_path" "https://raw.githubusercontent.com/${repo}/${release_tag}/deploy/systemd/stardust.service" || fail "could not download the systemd unit for ${release_tag}"
+		if ! getent group stardust >/dev/null; then
+			groupadd --system stardust || fail "could not create the stardust service group"
+		fi
+		if ! getent passwd stardust >/dev/null; then
+			useradd --system --gid stardust --no-create-home --shell /usr/sbin/nologin stardust || fail "could not create the stardust service user"
+		fi
+	else
+		plist_template="${tmp_dir}/com.ch55secake.stardust.template.plist"
+		plist_path="${tmp_dir}/com.ch55secake.stardust.plist"
+		launchd_label=com.ch55secake.stardust
+		launchd_target="${launchd_domain}/${launchd_label}"
+		launchd_agents_dir="${HOME}/Library/LaunchAgents"
+		launchd_log_dir="${HOME}/Library/Logs/Stardust"
+		curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+			--output "$plist_template" "https://raw.githubusercontent.com/${repo}/${release_tag}/deploy/launchd/${launchd_label}.plist" || fail "could not download the LaunchAgent plist for ${release_tag}"
+		cp "$plist_template" "$plist_path"
+		plutil -replace ProgramArguments.0 -string "${install_dir}/stardust" "$plist_path" || fail "could not configure the LaunchAgent binary path"
+		plutil -replace StandardOutPath -string "${launchd_log_dir}/stdout.log" "$plist_path" || fail "could not configure the LaunchAgent log path"
+		plutil -replace StandardErrorPath -string "${launchd_log_dir}/stderr.log" "$plist_path" || fail "could not configure the LaunchAgent error log path"
+		plutil -lint "$plist_path" || fail "the LaunchAgent plist failed validation"
 	fi
 fi
 
@@ -167,14 +199,23 @@ staged_path=""
 printf 'Installed Stardust (%s) to %s/stardust\n' "$archive_name" "${install_dir%/}"
 
 if [[ "$install_service" == true ]]; then
-	systemd-analyze verify "$unit_path" || fail "the systemd unit failed verification"
-	install -m 0644 "$unit_path" /etc/systemd/system/stardust.service || fail "could not install the systemd unit"
-	systemctl daemon-reload || fail "could not reload systemd units"
-	systemctl enable stardust.service || fail "could not enable the stardust service"
-	if systemctl is-active --quiet stardust.service; then
-		systemctl restart stardust.service || fail "could not restart stardust; inspect 'journalctl -u stardust'"
+	if [[ "$service_manager" == systemd ]]; then
+		systemd-analyze verify "$unit_path" || fail "the systemd unit failed verification"
+		install -m 0644 "$unit_path" /etc/systemd/system/stardust.service || fail "could not install the systemd unit"
+		systemctl daemon-reload || fail "could not reload systemd units"
+		systemctl enable stardust.service || fail "could not enable the stardust service"
+		if systemctl is-active --quiet stardust.service; then
+			systemctl restart stardust.service || fail "could not restart stardust; inspect 'journalctl -u stardust'"
+		else
+			systemctl start stardust.service || fail "could not start stardust; inspect 'journalctl -u stardust'"
+		fi
+		printf 'Enabled and started systemd service stardust. Check it with: systemctl status stardust\n'
 	else
-		systemctl start stardust.service || fail "could not start stardust; inspect 'journalctl -u stardust'"
+		mkdir -p "$launchd_agents_dir" "$launchd_log_dir"
+		launchctl bootout "$launchd_target" >/dev/null 2>&1 || true
+		install -m 0644 "$plist_path" "${launchd_agents_dir}/${launchd_label}.plist" || fail "could not install the LaunchAgent plist"
+		launchctl enable "$launchd_target" || fail "could not enable the Stardust LaunchAgent"
+		launchctl bootstrap "$launchd_domain" "${launchd_agents_dir}/${launchd_label}.plist" || fail "could not start the Stardust LaunchAgent"
+		printf 'Enabled and started LaunchAgent %s. Logs are in %s\n' "$launchd_label" "$launchd_log_dir"
 	fi
-	printf 'Enabled and started systemd service stardust. Check it with: systemctl status stardust\n'
 fi

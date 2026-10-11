@@ -69,3 +69,19 @@ jobs:
           GOARCH: ${{ matrix.arch }}
           GOOS: darwin
         run: go build ./cmd/stardust
+
+  launchd-plist:
+    name: launchd-plist
+    runs-on: macos-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+
+      - name: validate-launchd-plist
+        run: |
+          plutil -lint deploy/launchd/com.ch55secake.stardust.plist
+          cp deploy/launchd/com.ch55secake.stardust.plist "$RUNNER_TEMP/stardust.plist"
+          plutil -replace ProgramArguments.0 -string "$HOME/.local/bin/stardust" "$RUNNER_TEMP/stardust.plist"
+          plutil -replace StandardOutPath -string "$HOME/Library/Logs/Stardust/stdout.log" "$RUNNER_TEMP/stardust.plist"
+          plutil -replace StandardErrorPath -string "$HOME/Library/Logs/Stardust/stderr.log" "$RUNNER_TEMP/stardust.plist"
+          plutil -lint "$RUNNER_TEMP/stardust.plist"

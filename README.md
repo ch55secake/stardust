@@ -14,19 +14,24 @@ default so Orbit can reach it through an SSH port forward.
 
 ## Install
 
-On Linux or macOS, install the latest release with one command (the default
-destination is `/usr/local/bin`):
+Install the latest release with one command. On Linux, use:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | sudo bash
 ```
 
+On macOS, run as your logged-in user (do not use `sudo`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | bash
+```
+
 The installer detects `amd64` or `arm64` and verifies the archive against the
 published SHA-256 checksum. On Linux, it installs the binary, creates the
 unprivileged `stardust` account, and enables and starts the hardened systemd
-service; this requires root and a running systemd manager. On macOS it installs
-the binary only (launchd service management is not included). To install only
-the binary into a custom directory on either platform, use:
+service. On macOS, it installs the binary under `~/.local/bin` and starts a
+per-user LaunchAgent. To install only the binary into a custom directory on
+either platform, use:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | bash -s -- --no-service --install-dir "$HOME/.local/bin"
@@ -164,6 +169,23 @@ Forward the loopback port to the Orbit workstation:
 ```sh
 ssh -N -L 8787:127.0.0.1:8787 user@server
 ```
+
+## macOS LaunchAgent
+
+The macOS installer creates `~/Library/LaunchAgents/com.ch55secake.stardust.plist`
+for the logged-in user and starts Stardust at login. launchd restarts it if it
+exits unsuccessfully. Logs are written to `~/Library/Logs/Stardust/`.
+
+Inspect or stop the agent with:
+
+```sh
+launchctl print "gui/$(id -u)/com.ch55secake.stardust"
+launchctl bootout "gui/$(id -u)/com.ch55secake.stardust"
+```
+
+LaunchAgents require an active user login session. For headless macOS hosts,
+install the binary only with `--no-service` and manage it with your own process
+supervisor.
 
 ## Development
 
