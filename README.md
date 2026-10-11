@@ -12,9 +12,28 @@ so Orbit can reach it through an SSH port forward.
 - Graceful shutdown and useful lifecycle logging
 - Hardened systemd unit in `deploy/systemd/stardust.service`
 
+## Install
+
+On Linux, install the latest release with one command (the default destination
+is `/usr/local/bin`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | sudo bash
+```
+
+The installer detects `amd64` or `arm64`, verifies the release archive against
+the published SHA-256 checksum, and installs the `stardust` binary. To install
+without root privileges, choose a writable directory on your `PATH`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | bash -s -- --install-dir "$HOME/.local/bin"
+```
+
+To install a specific release, add `--version vX.Y.Z` to the command.
+
 ## Build and run
 
-Requirements: Go 1.26 or newer.
+Requirements for building from source: Go 1.26 or newer.
 
 ```sh
 make build
