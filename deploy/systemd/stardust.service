@@ -9,6 +9,8 @@ Group=stardust
 ExecStart=/usr/local/bin/stardust --listen 127.0.0.1:8787
 Restart=on-failure
 RestartSec=5s
+RuntimeDirectory=stardust
+RuntimeDirectoryMode=0750
 
 NoNewPrivileges=true
 PrivateTmp=true
