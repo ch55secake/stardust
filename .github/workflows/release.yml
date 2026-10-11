@@ -11,41 +11,13 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
-    steps:
-      - name: check-out-source
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: set-up-go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: create-release-tag
-        if: github.ref == 'refs/heads/main'
-        env:
-          RELEASE_TAG: v0.0.${{ github.run_number }}
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          if git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"; then
-            if [ "$(git rev-parse "refs/tags/${RELEASE_TAG}")" != "${GITHUB_SHA}" ]; then
-              echo "${RELEASE_TAG} already points to a different commit" >&2
-              exit 1
-            fi
-          else
-            git tag "${RELEASE_TAG}" "${GITHUB_SHA}"
-            git push origin "${RELEASE_TAG}"
-          fi
-
-      - name: release-with-goreleaser
-        uses: goreleaser/goreleaser-action@v7
-        with:
-          distribution: goreleaser
-          version: '~> v2'
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    uses: ch55secake/cheesecake-factory/.github/workflows/release.yml@92e4441efa5a11f9c3f704a5ce48cf752cde38de
+    with:
+      binary-name: stardust
+      build-package: ./cmd/stardust
+      cgo-enabled: '0'
+      ldflags: -s -w -X main.version={{.Version}}
+      go-version-file: go.mod
+      targets: '[{"goos":"linux","goarch":"amd64"},{"goos":"linux","goarch":"arm64"}]'
+    permissions:
+      contents: write
