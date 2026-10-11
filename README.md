@@ -21,15 +21,17 @@ is `/usr/local/bin`):
 curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | sudo bash
 ```
 
-The installer detects `amd64` or `arm64`, verifies the release archive against
-the published SHA-256 checksum, and installs the `stardust` binary. To install
-without root privileges, choose a writable directory on your `PATH`:
+By default, the installer detects `amd64` or `arm64`, verifies the archive
+against the published SHA-256 checksum, installs the binary, creates the
+unprivileged `stardust` account, and enables and starts the hardened systemd
+service. This requires root and a running systemd manager. To install only the
+binary without a service, choose a writable directory on your `PATH`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | bash -s -- --install-dir "$HOME/.local/bin"
+curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | bash -s -- --no-service --install-dir "$HOME/.local/bin"
 ```
 
-To install a specific release, add `--version vX.Y.Z` to the command.
+To install a specific release, add `--version vX.Y.Z` to either command.
 
 ## Build and run
 
@@ -138,7 +140,8 @@ returns HTTP 503.
 
 ## systemd
 
-Create a service account and install the binary and unit:
+The installer does this setup automatically. To install manually (for example,
+from a source build), create a service account and install the binary and unit:
 
 ```sh
 sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin stardust
