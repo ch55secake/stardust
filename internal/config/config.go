@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"time"
 )
 
@@ -32,6 +33,14 @@ func Default() Config {
 func (c Config) Validate() error {
 	if c.ListenAddress == "" {
 		return fmt.Errorf("listen address must not be empty")
+	}
+	host, _, err := net.SplitHostPort(c.ListenAddress)
+	if err != nil {
+		return fmt.Errorf("listen address %q must be a numeric loopback address and port: %w", c.ListenAddress, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("listen address %q is not supported: Stardust has no authentication or TLS and only serves numeric loopback addresses; use SSH port forwarding for remote access", c.ListenAddress)
 	}
 	if c.CollectionTimeout <= 0 {
 		return fmt.Errorf("collection timeout must be positive")

@@ -50,8 +50,11 @@ The default listener is `127.0.0.1:8787`. Useful options:
   --disk-path /
 ```
 
-The agent intentionally does not expose a public listening address unless an
-operator explicitly changes `--listen`.
+Stardust has no API authentication or TLS, so it only accepts numeric loopback
+listeners (`127.0.0.1` or `[::1]`). Wildcard addresses, hostnames (including
+`localhost`), and non-loopback IP addresses are rejected at startup with an
+actionable configuration error. Remote access is supported through SSH port
+forwarding; direct non-loopback deployment is not supported.
 
 ## API contract
 
