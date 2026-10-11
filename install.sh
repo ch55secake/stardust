@@ -13,14 +13,13 @@ Install the latest Stardust release for Linux or macOS.
 Usage: install.sh [--install-dir DIR] [--version vX.Y.Z] [--no-service]
 
 Options:
-  --install-dir DIR  Install Stardust into DIR (Linux: /usr/local/bin,
-                     macOS: ~/.local/bin)
+  --install-dir DIR  Install Stardust into DIR (default: /usr/local/bin)
   --version VERSION  Install a specific release (default: latest)
   --no-service       Install only the binary; do not create a service
   -h, --help         Show this help
 
-The install directory can also be set with STARDUST_INSTALL_DIR. Linux systemd
-installs require root; macOS LaunchAgents run as the logged-in user.
+The install directory can also be set with STARDUST_INSTALL_DIR. Service installs
+require root; the macOS LaunchDaemon runs as the invoking user.
 EOF
 }
 
@@ -69,8 +68,7 @@ Linux)
 Darwin)
 	goos=darwin
 	service_manager=launchd
-	[[ -n "${HOME:-}" ]] || fail "HOME must be set for a macOS LaunchAgent"
-	[[ -n "$install_dir" ]] || install_dir="${HOME}/.local/bin"
+	[[ -n "$install_dir" ]] || install_dir=/usr/local/bin
 	;;
 *) fail "only Linux and macOS are supported" ;;
 esac
@@ -106,12 +104,18 @@ if [[ "$install_service" == true ]]; then
 		done
 		systemctl show-environment >/dev/null 2>&1 || fail "systemd is not running; pass --no-service to install only the binary"
 	else
-		(( EUID != 0 )) || fail "macOS LaunchAgents must be installed as the logged-in user without sudo; use --no-service for a binary-only install"
-		for tool in launchctl plutil id; do
+		(( EUID == 0 )) || fail "macOS LaunchDaemon installation requires sudo; rerun with sudo or pass --no-service"
+		[[ -n "${SUDO_USER:-}" && "$SUDO_USER" != root ]] || fail "run sudo from the account that should own Stardust; direct root installation is unsupported"
+		for tool in launchctl plutil id chown; do
 			command -v "$tool" >/dev/null 2>&1 || fail "required command not found: $tool (or pass --no-service)"
 		done
-		launchd_domain="gui/$(id -u)"
-		launchctl print "$launchd_domain" >/dev/null 2>&1 || fail "no active macOS GUI login session; pass --no-service to install only the binary"
+		launchd_domain=system
+		launchd_label=com.ch55secake.stardust
+		launchd_target="${launchd_domain}/${launchd_label}"
+		launchd_user="$SUDO_USER"
+		launchd_group="$(id -gn "$launchd_user")" || fail "could not find the primary group for ${launchd_user}"
+		launchd_log_dir=/Library/Logs/Stardust
+		launchctl print system >/dev/null 2>&1 || fail "launchd system domain is unavailable; pass --no-service to install only the binary"
 	fi
 fi
 
@@ -176,17 +180,15 @@ if [[ "$install_service" == true ]]; then
 	else
 		plist_template="${tmp_dir}/com.ch55secake.stardust.template.plist"
 		plist_path="${tmp_dir}/com.ch55secake.stardust.plist"
-		launchd_label=com.ch55secake.stardust
-		launchd_target="${launchd_domain}/${launchd_label}"
-		launchd_agents_dir="${HOME}/Library/LaunchAgents"
-		launchd_log_dir="${HOME}/Library/Logs/Stardust"
 		curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
-			--output "$plist_template" "https://raw.githubusercontent.com/${repo}/${release_tag}/deploy/launchd/${launchd_label}.plist" || fail "could not download the LaunchAgent plist for ${release_tag}"
+			--output "$plist_template" "https://raw.githubusercontent.com/${repo}/${release_tag}/deploy/launchd/${launchd_label}.plist" || fail "could not download the LaunchDaemon plist for ${release_tag}"
 		cp "$plist_template" "$plist_path"
-		plutil -replace ProgramArguments.0 -string "${install_dir}/stardust" "$plist_path" || fail "could not configure the LaunchAgent binary path"
-		plutil -replace StandardOutPath -string "${launchd_log_dir}/stdout.log" "$plist_path" || fail "could not configure the LaunchAgent log path"
-		plutil -replace StandardErrorPath -string "${launchd_log_dir}/stderr.log" "$plist_path" || fail "could not configure the LaunchAgent error log path"
-		plutil -lint "$plist_path" || fail "the LaunchAgent plist failed validation"
+		plutil -replace ProgramArguments.0 -string "${install_dir}/stardust" "$plist_path" || fail "could not configure the LaunchDaemon binary path"
+		plutil -replace UserName -string "$launchd_user" "$plist_path" || fail "could not configure the LaunchDaemon user"
+		plutil -replace GroupName -string "$launchd_group" "$plist_path" || fail "could not configure the LaunchDaemon group"
+		plutil -replace StandardOutPath -string "${launchd_log_dir}/stdout.log" "$plist_path" || fail "could not configure the LaunchDaemon log path"
+		plutil -replace StandardErrorPath -string "${launchd_log_dir}/stderr.log" "$plist_path" || fail "could not configure the LaunchDaemon error log path"
+		plutil -lint "$plist_path" || fail "the LaunchDaemon plist failed validation"
 	fi
 fi
 
@@ -211,11 +213,13 @@ if [[ "$install_service" == true ]]; then
 		fi
 		printf 'Enabled and started systemd service stardust. Check it with: systemctl status stardust\n'
 	else
-		mkdir -p "$launchd_agents_dir" "$launchd_log_dir"
+		mkdir -p "$launchd_log_dir"
+		chown "$launchd_user:$launchd_group" "$launchd_log_dir" || fail "could not assign the Stardust log directory to ${launchd_user}"
+		chmod 0750 "$launchd_log_dir"
 		launchctl bootout "$launchd_target" >/dev/null 2>&1 || true
-		install -m 0644 "$plist_path" "${launchd_agents_dir}/${launchd_label}.plist" || fail "could not install the LaunchAgent plist"
-		launchctl enable "$launchd_target" || fail "could not enable the Stardust LaunchAgent"
-		launchctl bootstrap "$launchd_domain" "${launchd_agents_dir}/${launchd_label}.plist" || fail "could not start the Stardust LaunchAgent"
-		printf 'Enabled and started LaunchAgent %s. Logs are in %s\n' "$launchd_label" "$launchd_log_dir"
+		install -o root -g wheel -m 0644 "$plist_path" "/Library/LaunchDaemons/${launchd_label}.plist" || fail "could not install the LaunchDaemon plist"
+		launchctl enable "$launchd_target" || fail "could not enable the Stardust LaunchDaemon"
+		launchctl bootstrap "$launchd_domain" "/Library/LaunchDaemons/${launchd_label}.plist" || fail "could not start the Stardust LaunchDaemon"
+		printf 'Enabled and started LaunchDaemon %s as %s. Logs are in %s\n' "$launchd_label" "$launchd_user" "$launchd_log_dir"
 	fi
 fi

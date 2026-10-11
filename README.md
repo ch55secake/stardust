@@ -11,6 +11,7 @@ default so Orbit can reach it through an SSH port forward.
 - Configurable collection and request timeouts
 - Graceful shutdown and useful lifecycle logging
 - Hardened systemd unit in `deploy/systemd/stardust.service`
+- macOS LaunchDaemon in `deploy/launchd/com.ch55secake.stardust.plist`
 
 ## Install
 
@@ -20,18 +21,19 @@ Install the latest release with one command. On Linux, use:
 curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | sudo bash
 ```
 
-On macOS, run as your logged-in user (do not use `sudo`):
+On macOS, use `sudo` so the installer can install and start a system LaunchDaemon:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | sudo bash
 ```
 
 The installer detects `amd64` or `arm64` and verifies the archive against the
 published SHA-256 checksum. On Linux, it installs the binary, creates the
 unprivileged `stardust` account, and enables and starts the hardened systemd
-service. On macOS, it installs the binary under `~/.local/bin` and starts a
-per-user LaunchAgent. To install only the binary into a custom directory on
-either platform, use:
+service. On macOS, it installs the binary under `/usr/local/bin` and starts a
+LaunchDaemon as the account that invoked `sudo`. This works without an active
+GUI login session. To install only the binary into a custom directory on either
+platform, use:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | bash -s -- --no-service --install-dir "$HOME/.local/bin"
@@ -170,22 +172,22 @@ Forward the loopback port to the Orbit workstation:
 ssh -N -L 8787:127.0.0.1:8787 user@server
 ```
 
-## macOS LaunchAgent
+## macOS LaunchDaemon
 
-The macOS installer creates `~/Library/LaunchAgents/com.ch55secake.stardust.plist`
-for the logged-in user and starts Stardust at login. launchd restarts it if it
-exits unsuccessfully. Logs are written to `~/Library/Logs/Stardust/`.
+The macOS installer creates `/Library/LaunchDaemons/com.ch55secake.stardust.plist`
+and runs Stardust as the user who invoked `sudo` (not as root). The service
+starts at boot and launchd restarts it if it exits unsuccessfully. Logs are
+written to `/Library/Logs/Stardust/`.
 
-Inspect or stop the agent with:
+Inspect or stop the service with:
 
 ```sh
-launchctl print "gui/$(id -u)/com.ch55secake.stardust"
-launchctl bootout "gui/$(id -u)/com.ch55secake.stardust"
+sudo launchctl print system/com.ch55secake.stardust
+sudo launchctl bootout system/com.ch55secake.stardust
 ```
 
-LaunchAgents require an active user login session. For headless macOS hosts,
-install the binary only with `--no-service` and manage it with your own process
-supervisor.
+For binary-only installation, use `--no-service` and manage the process with
+your own supervisor.
 
 ## Development
 

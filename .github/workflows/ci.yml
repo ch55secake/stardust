@@ -81,7 +81,9 @@ jobs:
         run: |
           plutil -lint deploy/launchd/com.ch55secake.stardust.plist
           cp deploy/launchd/com.ch55secake.stardust.plist "$RUNNER_TEMP/stardust.plist"
-          plutil -replace ProgramArguments.0 -string "$HOME/.local/bin/stardust" "$RUNNER_TEMP/stardust.plist"
-          plutil -replace StandardOutPath -string "$HOME/Library/Logs/Stardust/stdout.log" "$RUNNER_TEMP/stardust.plist"
-          plutil -replace StandardErrorPath -string "$HOME/Library/Logs/Stardust/stderr.log" "$RUNNER_TEMP/stardust.plist"
+          plutil -replace ProgramArguments.0 -string /usr/local/bin/stardust "$RUNNER_TEMP/stardust.plist"
+          plutil -replace UserName -string runner "$RUNNER_TEMP/stardust.plist"
+          plutil -replace GroupName -string staff "$RUNNER_TEMP/stardust.plist"
+          plutil -replace StandardOutPath -string /Library/Logs/Stardust/stdout.log "$RUNNER_TEMP/stardust.plist"
+          plutil -replace StandardErrorPath -string /Library/Logs/Stardust/stderr.log "$RUNNER_TEMP/stardust.plist"
           plutil -lint "$RUNNER_TEMP/stardust.plist"
