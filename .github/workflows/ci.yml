@@ -81,9 +81,16 @@ jobs:
         run: |
           plutil -lint deploy/launchd/com.ch55secake.stardust.plist
           cp deploy/launchd/com.ch55secake.stardust.plist "$RUNNER_TEMP/stardust.plist"
-          plutil -replace ProgramArguments.0 -string /usr/local/bin/stardust "$RUNNER_TEMP/stardust.plist"
+          plutil -replace ProgramArguments -array "$RUNNER_TEMP/stardust.plist"
+          plutil -insert ProgramArguments -string /usr/local/bin/stardust -append "$RUNNER_TEMP/stardust.plist"
+          plutil -insert ProgramArguments -string --listen -append "$RUNNER_TEMP/stardust.plist"
+          plutil -insert ProgramArguments -string 127.0.0.1:8787 -append "$RUNNER_TEMP/stardust.plist"
           plutil -replace UserName -string runner "$RUNNER_TEMP/stardust.plist"
           plutil -replace GroupName -string staff "$RUNNER_TEMP/stardust.plist"
           plutil -replace StandardOutPath -string /Library/Logs/Stardust/stdout.log "$RUNNER_TEMP/stardust.plist"
           plutil -replace StandardErrorPath -string /Library/Logs/Stardust/stderr.log "$RUNNER_TEMP/stardust.plist"
           plutil -lint "$RUNNER_TEMP/stardust.plist"
+          test "$(plutil -extract ProgramArguments raw -o - "$RUNNER_TEMP/stardust.plist")" = 3
+          test "$(plutil -extract ProgramArguments.0 raw -o - "$RUNNER_TEMP/stardust.plist")" = /usr/local/bin/stardust
+          test "$(plutil -extract ProgramArguments.1 raw -o - "$RUNNER_TEMP/stardust.plist")" = --listen
+          test "$(plutil -extract ProgramArguments.2 raw -o - "$RUNNER_TEMP/stardust.plist")" = 127.0.0.1:8787

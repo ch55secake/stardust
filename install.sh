@@ -183,7 +183,10 @@ if [[ "$install_service" == true ]]; then
 		curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
 			--output "$plist_template" "https://raw.githubusercontent.com/${repo}/${release_tag}/deploy/launchd/${launchd_label}.plist" || fail "could not download the LaunchDaemon plist for ${release_tag}"
 		cp "$plist_template" "$plist_path"
-		plutil -replace ProgramArguments.0 -string "${install_dir}/stardust" "$plist_path" || fail "could not configure the LaunchDaemon binary path"
+		plutil -replace ProgramArguments -array "$plist_path" || fail "could not reset the LaunchDaemon arguments"
+		plutil -insert ProgramArguments -string "${install_dir}/stardust" -append "$plist_path" || fail "could not configure the LaunchDaemon binary path"
+		plutil -insert ProgramArguments -string --listen -append "$plist_path" || fail "could not configure the LaunchDaemon listener option"
+		plutil -insert ProgramArguments -string 127.0.0.1:8787 -append "$plist_path" || fail "could not configure the LaunchDaemon listener address"
 		plutil -replace UserName -string "$launchd_user" "$plist_path" || fail "could not configure the LaunchDaemon user"
 		plutil -replace GroupName -string "$launchd_group" "$plist_path" || fail "could not configure the LaunchDaemon group"
 		plutil -replace StandardOutPath -string "${launchd_log_dir}/stdout.log" "$plist_path" || fail "could not configure the LaunchDaemon log path"
