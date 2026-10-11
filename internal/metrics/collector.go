@@ -13,7 +13,8 @@ import (
 
 // Snapshot is the stable metrics payload exposed by the v1 API. Byte fields
 // are bytes, percentages are in the inclusive range 0-100, and uptime is in
-// seconds.
+// seconds. CPU usage is a non-blocking delta since the previous CPU sample;
+// network counters are cumulative totals aggregated over all interfaces.
 type Snapshot struct {
 	Hostname string        `json:"hostname"`
 	OS       OSInfo        `json:"os"`
@@ -63,8 +64,18 @@ type Network struct {
 }
 
 type Collector struct {
-	timeout  time.Duration
-	diskPath string
+	timeout   time.Duration
+	diskPath  string
+	functions collectorFunctions
+}
+
+type collectorFunctions struct {
+	hostInfo        func(context.Context) (*host.InfoStat, error)
+	cpuPercent      func(context.Context) ([]float64, error)
+	logicalCores    func(context.Context) (int, error)
+	virtualMemory   func(context.Context) (*mem.VirtualMemoryStat, error)
+	diskUsage       func(context.Context, string) (*disk.UsageStat, error)
+	networkCounters func(context.Context) ([]psnet.IOCountersStat, error)
 }
 
 func NewCollector(timeout time.Duration, diskPath string) *Collector {
@@ -74,7 +85,20 @@ func NewCollector(timeout time.Duration, diskPath string) *Collector {
 	if diskPath == "" {
 		diskPath = "/"
 	}
-	return &Collector{timeout: timeout, diskPath: diskPath}
+	return &Collector{
+		timeout:  timeout,
+		diskPath: diskPath,
+		functions: collectorFunctions{
+			hostInfo:      host.InfoWithContext,
+			cpuPercent:    func(ctx context.Context) ([]float64, error) { return cpu.PercentWithContext(ctx, 0, false) },
+			logicalCores:  func(ctx context.Context) (int, error) { return cpu.CountsWithContext(ctx, true) },
+			virtualMemory: mem.VirtualMemoryWithContext,
+			diskUsage:     disk.UsageWithContext,
+			networkCounters: func(ctx context.Context) ([]psnet.IOCountersStat, error) {
+				return psnet.IOCountersWithContext(ctx, false)
+			},
+		},
+	}
 }
 
 func (c *Collector) Collect(ctx context.Context) (Snapshot, error) {
@@ -92,7 +116,7 @@ func (c *Collector) Collect(ctx context.Context) (Snapshot, error) {
 		return snapshot, err
 	}
 
-	info, err := host.InfoWithContext(ctx)
+	info, err := c.functions.hostInfo(ctx)
 	if err != nil {
 		addError("host", err)
 	} else {
@@ -105,21 +129,30 @@ func (c *Collector) Collect(ctx context.Context) (Snapshot, error) {
 		}
 		snapshot.Uptime = info.Uptime
 	}
+	if err := ctx.Err(); err != nil {
+		return snapshot, err
+	}
 
-	percent, err := cpu.PercentWithContext(ctx, 0, false)
+	percent, err := c.functions.cpuPercent(ctx)
 	if err != nil {
 		addError("cpu", err)
 	} else if len(percent) > 0 {
 		snapshot.CPU.UsagePercent = percent[0]
 	}
-	cores, err := cpu.CountsWithContext(ctx, true)
+	if err := ctx.Err(); err != nil {
+		return snapshot, err
+	}
+	cores, err := c.functions.logicalCores(ctx)
 	if err != nil {
 		addError("cpu", err)
 	} else {
 		snapshot.CPU.LogicalCores = cores
 	}
+	if err := ctx.Err(); err != nil {
+		return snapshot, err
+	}
 
-	memory, err := mem.VirtualMemoryWithContext(ctx)
+	memory, err := c.functions.virtualMemory(ctx)
 	if err != nil {
 		addError("memory", err)
 	} else {
@@ -129,8 +162,11 @@ func (c *Collector) Collect(ctx context.Context) (Snapshot, error) {
 			UsedPercent: memory.UsedPercent,
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return snapshot, err
+	}
 
-	usage, err := disk.UsageWithContext(ctx, c.diskPath)
+	usage, err := c.functions.diskUsage(ctx, c.diskPath)
 	if err != nil {
 		addError("disk", err)
 	} else {
@@ -141,8 +177,11 @@ func (c *Collector) Collect(ctx context.Context) (Snapshot, error) {
 			UsedPercent: usage.UsedPercent,
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return snapshot, err
+	}
 
-	interfaces, err := psnet.IOCountersWithContext(ctx, false)
+	interfaces, err := c.functions.networkCounters(ctx)
 	if err != nil {
 		addError("network", err)
 	} else {
@@ -152,6 +191,9 @@ func (c *Collector) Collect(ctx context.Context) (Snapshot, error) {
 			snapshot.Network.PacketsReceived += iface.PacketsRecv
 			snapshot.Network.PacketsSent += iface.PacketsSent
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return snapshot, err
 	}
 
 	snapshot.Errors = errs

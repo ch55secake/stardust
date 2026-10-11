@@ -64,11 +64,29 @@ Returns HTTP 200 when the process is healthy:
 
 ### `GET /api/v1/metrics`
 
-Returns HTTP 200 with a `data` object. Byte fields are bytes, percentages are
-0-100, and `uptime_seconds` is seconds. `network` values are aggregate
-interface counters. If an individual metric is unavailable, the response
-still returns available data and includes a `data.errors` array with the
-metric name and reason. A collection timeout returns HTTP 503.
+Returns HTTP 200 with a `data` object. Values use the host's current state when
+each metric is collected; fields are not an atomic, same-instant snapshot.
+Metric semantics:
+
+- `hostname` and `os` come from host OS metadata; `uptime_seconds` is elapsed
+  seconds since boot.
+- `cpu.usage_percent` is the system-wide, non-blocking CPU usage delta since
+  the previous CPU sample, not an instantaneous reading or a fixed-interval
+  average. The first sample can be unavailable until a baseline exists.
+  `logical_cores` is the count of online logical CPUs.
+- `memory` reports host virtual memory used/total bytes and used percentage as
+  provided by the OS metrics library.
+- `disk` reports usage for the filesystem containing the configured
+  `--disk-path`; sizes are bytes and the percentage is 0-100.
+- `network` reports cumulative bytes and packets sent/received, summed across
+  all interfaces reported by the OS, including loopback and virtual interfaces.
+  These counters can reset on reboot or interface reset, and forwarded traffic
+  may be counted on more than one interface.
+
+If an individual metric is unavailable, the response still returns available
+data and includes a `data.errors` array with the metric name and reason. The
+collector checks its deadline between metric reads; a collection timeout
+returns HTTP 503.
 
 ```json
 {
