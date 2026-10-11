@@ -1,8 +1,8 @@
 # Stardust
 
-Stardust is a lightweight Linux telemetry agent for Orbit. It runs without
-root privileges, keeps no persistent state, and binds to loopback by default
-so Orbit can reach it through an SSH port forward.
+Stardust is a lightweight Linux and macOS telemetry agent for Orbit. It runs
+without root privileges, keeps no persistent state, and binds to loopback by
+default so Orbit can reach it through an SSH port forward.
 
 ## Features
 
@@ -14,18 +14,19 @@ so Orbit can reach it through an SSH port forward.
 
 ## Install
 
-On Linux, install the latest release with one command (the default destination
-is `/usr/local/bin`):
+On Linux or macOS, install the latest release with one command (the default
+destination is `/usr/local/bin`):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | sudo bash
 ```
 
-By default, the installer detects `amd64` or `arm64`, verifies the archive
-against the published SHA-256 checksum, installs the binary, creates the
+The installer detects `amd64` or `arm64` and verifies the archive against the
+published SHA-256 checksum. On Linux, it installs the binary, creates the
 unprivileged `stardust` account, and enables and starts the hardened systemd
-service. This requires root and a running systemd manager. To install only the
-binary without a service, choose a writable directory on your `PATH`:
+service; this requires root and a running systemd manager. On macOS it installs
+the binary only (launchd service management is not included). To install only
+the binary into a custom directory on either platform, use:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | bash -s -- --no-service --install-dir "$HOME/.local/bin"
@@ -140,8 +141,9 @@ returns HTTP 503.
 
 ## systemd
 
-The installer does this setup automatically. To install manually (for example,
-from a source build), create a service account and install the binary and unit:
+On Linux, the installer does this setup automatically. To install manually
+(for example, from a source build), create a service account and install the
+binary and unit:
 
 ```sh
 sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin stardust
@@ -174,4 +176,5 @@ make lint
 
 The release workflow uses the shared GoReleaser workflow and publishes a GitHub
 release for every push to `main`. It automatically selects the next semantic
-version from published releases; manual dispatch follows the same path.
+version from published releases; manual dispatch follows the same path. Release
+archives are built for Linux and macOS on amd64 and arm64.

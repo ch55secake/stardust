@@ -46,3 +46,26 @@ jobs:
 
       - name: verify-systemd-deployment
         run: sudo bash deploy/systemd/test.sh
+
+  darwin-build:
+    name: darwin-build-${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+
+      - name: set-up-go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build-darwin
+        env:
+          CGO_ENABLED: '0'
+          GOARCH: ${{ matrix.arch }}
+          GOOS: darwin
+        run: go build ./cmd/stardust

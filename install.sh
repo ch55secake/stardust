@@ -8,7 +8,7 @@ install_service=true
 
 usage() {
 	cat <<'EOF'
-Install the latest Stardust release for Linux.
+Install the latest Stardust release for Linux or macOS.
 
 Usage: install.sh [--install-dir DIR] [--version vX.Y.Z] [--no-service]
 
@@ -60,16 +60,32 @@ if [[ -n "$version" && ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 	fail "invalid version '$version' (expected vX.Y.Z)"
 fi
 
-[[ "$(uname -s)" == Linux ]] || fail "only Linux is supported"
+case "$(uname -s)" in
+Linux) goos=linux ;;
+Darwin)
+	goos=darwin
+	install_service=false
+	;;
+*) fail "only Linux and macOS are supported" ;;
+esac
+
 case "$(uname -m)" in
 x86_64|amd64) arch=amd64 ;;
 aarch64|arm64) arch=arm64 ;;
 *) fail "unsupported architecture: $(uname -m) (supported: x86_64, aarch64)" ;;
 esac
 
-for tool in curl tar awk sha256sum install mktemp; do
+for tool in curl tar awk install mktemp; do
 	command -v "$tool" >/dev/null 2>&1 || fail "required command not found: $tool"
 done
+case "$goos" in
+	linux)
+		command -v sha256sum >/dev/null 2>&1 || fail "required command not found: sha256sum"
+		;;
+	darwin)
+		command -v shasum >/dev/null 2>&1 || fail "required command not found: shasum"
+		;;
+esac
 
 if [[ "$install_service" == true ]]; then
 	case "$install_dir" in
@@ -104,11 +120,12 @@ curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
 	--output "$checksums_path" "${release_url}/checksums.txt" || fail "could not download release checksums"
 
 archive_name="$(awk -v arch="$arch" \
-	'$2 ~ ("^stardust_.*_linux_" arch "\\.tar\\.gz$") { print $2; exit }' \
+	-v goos="$goos" \
+	'$2 ~ ("^stardust_.*_" goos "_" arch "\\.tar\\.gz$") { print $2; exit }' \
 	"$checksums_path")"
-[[ -n "$archive_name" ]] || fail "release has no Linux ${arch} archive"
+[[ -n "$archive_name" ]] || fail "release has no ${goos} ${arch} archive"
 archive_version="${archive_name#stardust_}"
-archive_version="${archive_version%_linux_${arch}.tar.gz}"
+archive_version="${archive_version%_${goos}_${arch}.tar.gz}"
 [[ "$archive_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "invalid release archive name: ${archive_name}"
 release_tag="v${archive_version}"
 
@@ -119,7 +136,11 @@ archive_path="${tmp_dir}/${archive_name}"
 curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
 	--output "$archive_path" "${release_url}/${archive_name}" || fail "could not download ${archive_name}"
 
-actual_checksum="$(sha256sum "$archive_path" | awk '{ print $1 }')"
+if [[ "$goos" == linux ]]; then
+	actual_checksum="$(sha256sum "$archive_path" | awk '{ print $1 }')"
+else
+	actual_checksum="$(shasum -a 256 "$archive_path" | awk '{ print $1 }')"
+fi
 [[ "$actual_checksum" == "$expected_checksum" ]] || fail "checksum verification failed for ${archive_name}"
 
 tar -xzf "$archive_path" -C "$tmp_dir" stardust || fail "could not extract Stardust from archive"
