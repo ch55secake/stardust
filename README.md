@@ -141,12 +141,18 @@ returns HTTP 503.
 Create a service account and install the binary and unit:
 
 ```sh
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin stardust
+sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin stardust
 sudo install -m 0755 bin/stardust /usr/local/bin/stardust
 sudo install -m 0644 deploy/systemd/stardust.service /etc/systemd/system/stardust.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now stardust
 ```
+
+The unit creates `/run/stardust` as a private runtime directory owned by the
+service account and removes it when the service stops. On a disposable Linux
+machine with systemd, the deployment can be exercised with `make build` followed
+by `sudo bash deploy/systemd/test.sh`; the test installs, starts, restarts, and
+stops the service, then removes its unit file.
 
 Forward the loopback port to the Orbit workstation:
 

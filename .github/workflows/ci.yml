@@ -27,3 +27,22 @@ jobs:
     with:
       go-package: ./...
       go-version-input: '1.26.9'
+
+  systemd:
+    name: systemd-integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+
+      - name: set-up-go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build
+        run: make build
+
+      - name: verify-systemd-deployment
+        run: sudo bash deploy/systemd/test.sh
