@@ -123,6 +123,6 @@ make build
 make lint
 ```
 
-The release workflow creates a `v0.0.<run-number>` tag and publishes a GitHub
-release for every push to `main`. Manual dispatch from `main` follows the same
-path; dispatching from an existing version tag publishes that tag.
+The release workflow uses the shared GoReleaser workflow and publishes a GitHub
+release for every push to `main`. It automatically selects the next semantic
+version from published releases; manual dispatch follows the same path.
