@@ -20,6 +20,10 @@ type Server struct {
 }
 
 func NewServer(cfg config.Config, logger *slog.Logger) *Server {
+	return NewServerWithAPIToken(cfg, logger, "")
+}
+
+func NewServerWithAPIToken(cfg config.Config, logger *slog.Logger, apiToken string) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -27,7 +31,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) *Server {
 	return &Server{
 		httpServer: &http.Server{
 			Addr:              cfg.ListenAddress,
-			Handler:           api.NewHandler(collector, cfg.RequestTimeout, logger, api.WithServices(cfg.ServicePolicy, services.NewSystemd())),
+			Handler:           api.NewHandlerWithToken(collector, cfg.RequestTimeout, logger, apiToken, api.WithServices(cfg.ServicePolicy, services.NewSystemd())),
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       cfg.RequestTimeout,
 			WriteTimeout:      cfg.RequestTimeout,

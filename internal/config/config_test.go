@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -46,5 +48,86 @@ func TestValidateListenAddressPolicy(t *testing.T) {
 				t.Fatalf("Validate() error = %q, want it to contain %q", err, test.wantMessage)
 			}
 		})
+	}
+}
+
+func TestReadAPITokenFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "api-token")
+	token := strings.Repeat("a", MinAPITokenLength)
+	tests := []struct {
+		name    string
+		content string
+		mode    os.FileMode
+		valid   bool
+	}{
+		{name: "private with newline", content: token + "\n", mode: 0o600, valid: true},
+		{name: "private with CRLF", content: token + "\r\n", mode: 0o600, valid: true},
+		{name: "owner read only", content: token, mode: 0o400, valid: true},
+		{name: "public mode", content: token, mode: 0o644},
+		{name: "group readable", content: token, mode: 0o640},
+		{name: "too short", content: "short", mode: 0o600},
+		{name: "leading whitespace", content: " " + token, mode: 0o600},
+		{name: "trailing whitespace", content: token + " ", mode: 0o600},
+		{name: "embedded whitespace", content: token[:16] + " " + token[16:], mode: 0o600},
+		{name: "non ASCII", content: token[:31] + "é", mode: 0o600},
+		{name: "too large", content: strings.Repeat("a", MaxAPITokenFileSize+1), mode: 0o600},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(test.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, test.mode); err != nil {
+				t.Fatal(err)
+			}
+			got, err := ReadAPITokenFile(path)
+			if (err == nil) != test.valid {
+				t.Fatalf("valid=%v, token=%q, error=%v", test.valid, got, err)
+			}
+			if test.valid && got != token {
+				t.Fatalf("token = %q, want configured token", got)
+			}
+			if err != nil && strings.Contains(err.Error(), token) {
+				t.Fatal("token leaked in error")
+			}
+		})
+	}
+	if got, err := ReadAPITokenFile(""); err != nil || got != "" {
+		t.Fatalf("empty path should disable authentication: token=%q error=%v", got, err)
+	}
+	link := filepath.Join(t.TempDir(), "token-link")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadAPITokenFile(link); err == nil {
+		t.Fatal("symbolic link accepted")
+	}
+	if _, err := ReadAPITokenFile(t.TempDir()); err == nil {
+		t.Fatal("directory accepted")
+	}
+	unsafeDirectory := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(unsafeDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unsafeDirectory, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	unsafePath := filepath.Join(unsafeDirectory, "token")
+	if err := os.WriteFile(unsafePath, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadAPITokenFile(unsafePath); err == nil {
+		t.Fatal("token in group/other-writable directory accepted")
+	}
+}
+
+func TestValidateAPITokenFilePath(t *testing.T) {
+	cfg := Default()
+	cfg.APITokenFile = " \t "
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "API token file path") {
+		t.Fatalf("Validate() error = %v, want invalid token file path", err)
 	}
 }
