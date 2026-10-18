@@ -50,6 +50,9 @@ func TestMetricsReturnsCompleteFixture(t *testing.T) {
 			BytesSent:       500,
 			PacketsReceived: 20,
 			PacketsSent:     10,
+			Interfaces: []metrics.NetworkInterface{
+				{Name: "eth0", BytesReceived: 1000, BytesSent: 500, PacketsReceived: 20, PacketsSent: 10},
+			},
 		},
 	}
 	handler := NewHandler(fixtureCollector{snapshot: want}, time.Second, testLogger())
