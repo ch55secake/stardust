@@ -3,7 +3,7 @@ VERSION ?= dev
 GO ?= go
 GOLANGCI_LINT_VERSION ?= v2.14.0
 
-.PHONY: build run test lint fmt release
+.PHONY: build run test test-install lint fmt release
 
 build:
 	mkdir -p bin
@@ -14,6 +14,9 @@ run:
 
 test:
 	$(GO) test ./...
+
+test-install:
+	python3 -m unittest discover -s tests -v
 
 lint:
 	@if command -v golangci-lint >/dev/null 2>&1; then golangci-lint run; else $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run; fi
