@@ -49,6 +49,15 @@ func TestMetricsReturnsCompleteFixture(t *testing.T) {
 		Memory: metrics.Memory{UsedBytes: 1000, TotalBytes: 2000, UsedPercent: 50},
 		Swap:   metrics.Swap{TotalBytes: 1000, UsedBytes: 300, FreeBytes: 700, UsedPercent: 30},
 		Disk:   metrics.Disk{Path: "/", UsedBytes: 1000, TotalBytes: 2000, UsedPercent: 50},
+		Filesystems: []metrics.Filesystem{{
+			Mountpoint:     "/",
+			Device:         "/dev/root",
+			FilesystemType: "ext4",
+			UsedBytes:      1000,
+			TotalBytes:     2000,
+			AvailableBytes: 900,
+			UsedPercent:    50,
+		}},
 		Uptime: 86400,
 		Network: metrics.Network{
 			BytesReceived:   1000,
