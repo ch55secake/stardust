@@ -158,6 +158,9 @@ func TestUnsupportedMethodsUseErrorSchema(t *testing.T) {
 			handler.ServeHTTP(recorder, request)
 
 			assertErrorResponse(t, recorder, http.StatusMethodNotAllowed, "method_not_allowed")
+			if got, want := recorder.Header().Get("Allow"), http.MethodGet; got != want {
+				t.Errorf("Allow header = %q, want %q", got, want)
+			}
 		})
 	}
 }
