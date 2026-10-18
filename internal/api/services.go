@@ -29,11 +29,19 @@ type ServicePage struct {
 	NextCursor string          `json:"next_cursor,omitempty"`
 }
 
+func WithServiceLogs(policy *services.Policy, reader services.JournalReader) func(*Handler) {
+	return func(h *Handler) {
+		h.logPolicy, h.journalReader = policy, reader
+		h.logSlots = make(chan struct{}, maxConcurrentServiceLogReads)
+	}
+}
+
 func (h *Handler) serviceRoute(w http.ResponseWriter, r *http.Request) bool {
 	capabilities := r.URL.Path == "/api/v1/capabilities"
 	list := r.URL.Path == "/api/v1/services"
-	detail := strings.HasPrefix(r.URL.Path, "/api/v1/services/")
-	if !capabilities && !list && !detail {
+	logs := strings.HasPrefix(r.URL.Path, "/api/v1/services/") && strings.HasSuffix(r.URL.Path, "/logs")
+	detail := strings.HasPrefix(r.URL.Path, "/api/v1/services/") && !logs
+	if !capabilities && !list && !detail && !logs {
 		return false
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -47,7 +55,11 @@ func (h *Handler) serviceRoute(w http.ResponseWriter, r *http.Request) bool {
 			APIVersion string              `json:"api_version"`
 			Timestamp  time.Time           `json:"timestamp"`
 			Services   ServiceCapabilities `json:"services"`
-		}{APIVersion: Version, Timestamp: time.Now().UTC(), Services: ServiceCapabilities{Enabled: h.servicePolicy != nil && h.serviceInspector != nil, Supported: h.serviceInspector != nil && h.serviceInspector.Supported(), Authentication: "bearer"}})
+		}{APIVersion: Version, Timestamp: time.Now().UTC(), Services: ServiceCapabilities{Enabled: h.servicePolicy != nil && h.serviceInspector != nil, Supported: h.serviceInspector != nil && h.serviceInspector.Supported(), Authentication: "bearer", Logs: h.servicePolicy != nil && h.serviceInspector != nil && h.serviceInspector.Supported() && h.logPolicy != nil && h.journalReader != nil && h.journalReader.Supported()}})
+		return true
+	}
+	if logs {
+		h.serviceLogs(w, r)
 		return true
 	}
 	if h.servicePolicy == nil || h.serviceInspector == nil {

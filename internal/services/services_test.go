@@ -58,6 +58,30 @@ func TestPolicyValidationAndAuthorization(t *testing.T) {
 	}
 }
 
+func TestLogReadPolicyHasIndependentCredentialAndAllowlist(t *testing.T) {
+	logToken := "abcdef0123456789abcdef0123456789"
+	policy, err := NewPolicyWithLogs(testToken, []string{"web.service"}, logToken, []string{"web.service", "worker@blue.service"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := policy.LogReadPolicy()
+	if logs == nil || !logs.Authorized(logToken) || logs.Authorized(testToken) || policy.Authorized(logToken) {
+		t.Fatal("inventory and log credentials were not isolated")
+	}
+	if logs.Allows("web.service") != true || logs.Allows("worker@blue.service") != true || logs.Allows("private.service") {
+		t.Fatal("log allowlist incorrect")
+	}
+	if policy.Allows("private.service") {
+		t.Fatal("log allowlist widened service inventory")
+	}
+	if _, err := NewPolicyWithLogs(testToken, nil, testToken, nil); err == nil {
+		t.Fatal("shared service/log token accepted")
+	}
+	if _, err := NewPolicyWithLogs(testToken, nil, logToken, []string{"*.service"}); err == nil {
+		t.Fatal("invalid log unit accepted")
+	}
+}
+
 func TestLoadPolicyPrivateFileAndSafeErrors(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "policy.json")
 	valid := `{"token":"` + testToken + `","units":["sshd.service"]}`
@@ -69,6 +93,9 @@ func TestLoadPolicyPrivateFileAndSafeErrors(t *testing.T) {
 		{"private", valid, 0600, true},
 		{"readonly", valid, 0400, true},
 		{"empty allowlist", `{"token":"` + testToken + `","units":[]}`, 0600, true},
+		{"separate log policy", `{"token":"` + testToken + `","units":["web.service"],"logs":{"token":"abcdef0123456789abcdef0123456789","units":["web.service"]}}`, 0600, true},
+		{"same log token", `{"token":"` + testToken + `","units":[],"logs":{"token":"` + testToken + `","units":[]}}`, 0600, false},
+		{"invalid log unit", `{"token":"` + testToken + `","units":[],"logs":{"token":"abcdef0123456789abcdef0123456789","units":["*.service"]}}`, 0600, false},
 		{"public", valid, 0644, false},
 		{"group readable", valid, 0640, false},
 		{"invalid JSON", testToken, 0600, false},

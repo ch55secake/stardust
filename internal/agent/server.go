@@ -31,7 +31,7 @@ func NewServerWithAPIToken(cfg config.Config, logger *slog.Logger, apiToken stri
 	return &Server{
 		httpServer: &http.Server{
 			Addr:              cfg.ListenAddress,
-			Handler:           api.NewHandlerWithToken(collector, cfg.RequestTimeout, logger, apiToken, api.WithServices(cfg.ServicePolicy, services.NewSystemd())),
+			Handler:           api.NewHandlerWithToken(collector, cfg.RequestTimeout, logger, apiToken, api.WithServices(cfg.ServicePolicy, services.NewSystemd()), api.WithServiceLogs(cfg.ServicePolicy.LogReadPolicy(), services.NewJournal())),
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       cfg.RequestTimeout,
 			WriteTimeout:      cfg.RequestTimeout,

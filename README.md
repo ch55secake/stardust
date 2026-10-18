@@ -219,14 +219,17 @@ returns HTTP 503.
 
 ## systemd
 
-### Read-only service inventory
+### Read-only systemd services and logs
 
-Optional authenticated service list/detail endpoints are documented in
+Optional authenticated service list/detail and separately authorized service log
+endpoints are documented in
 [`docs/services-api.md`](docs/services-api.md), including capability discovery,
-pagination, errors, and client credential handling. Inventory is disabled by
-default; enabling it requires a private policy file with a read token and exact
-unit allowlist. This does not grant log access or restart privileges, change the
-existing health/metrics policy, or add support for non-loopback listeners.
+pagination, errors, and client credential handling. Inventory and logs are
+disabled by default; inventory requires a private policy file with a read token
+and exact unit allowlist. Logs require a distinct log-read token and independent
+unit allowlist. Journal permission is never added by the installer. This does not
+grant restart privileges, change the existing health/metrics policy, or add
+support for non-loopback listeners.
 
 ### Installing the agent service
 
