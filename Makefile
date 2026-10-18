@@ -16,7 +16,7 @@ test:
 	$(GO) test ./...
 
 test-install:
-	python3 -m unittest discover -s tests -v
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 
 lint:
 	@if command -v golangci-lint >/dev/null 2>&1; then golangci-lint run; else $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run; fi
