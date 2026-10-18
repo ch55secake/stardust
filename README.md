@@ -63,12 +63,30 @@ The default listener is `127.0.0.1:8787`. Useful options:
 Listener ports must be decimal TCP ports from `1` through `65535`; port `0` is
 rejected because Stardust does not report an OS-assigned ephemeral port.
 
-The health and metrics API has no authentication or TLS. The optional service
-inventory uses a separate bearer token when enabled. Stardust only accepts
-numeric loopback listeners (`127.0.0.1` or `[::1]`); wildcard addresses,
-hostnames (including `localhost`), and non-loopback IP addresses are rejected at
-startup. Remote access is supported through SSH port forwarding; direct
-non-loopback deployment is not supported.
+Stardust only accepts numeric loopback listeners (`127.0.0.1` or `[::1]`); it
+does not support TLS or direct non-loopback deployment. Remote access is
+supported through SSH port forwarding. Loopback prevents remote network access,
+but does not prevent other local accounts from connecting. For backward
+compatibility, health and metrics remain unauthenticated by default; enable the
+optional bearer token for multi-user hosts. This protects against other local
+accounts, but not root or processes running as Stardust's own account. The
+optional service inventory uses a separate bearer token when enabled.
+
+To enable authentication, provision a cryptographically random token (for
+example, 32 random bytes encoded as hexadecimal) in a regular file owned by the
+runtime account with mode `0400` or `0600`, then start Stardust with
+`--api-token-file /path/to/private-token`. The file must not be a symlink and
+must be under root- or runtime-owned directories not writable by group or other
+users. It must contain at least 32 printable non-space ASCII characters (a
+trailing newline is allowed).
+Stardust reads it once at startup and requires `Authorization: Bearer <token>` on
+**both** health and metrics endpoints. Do not pass the token as a command-line
+option or write it to logs; only the file path is passed as configuration. Store
+and rotate the token using a private credential store, and configure clients to
+add it to request headers without logging it. To rotate it, replace the file
+securely and restart Stardust, then update client credentials. Authentication
+does not enable non-loopback listeners or provide TLS; use the existing SSH
+tunnel for remote access.
 
 ## API contract
 

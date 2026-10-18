@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -195,6 +196,67 @@ func TestHealth(t *testing.T) {
 	}
 	if response.APIVersion != Version || response.Status != "ok" {
 		t.Fatalf("unexpected response: %+v", response)
+	}
+}
+
+func TestOptionalBearerAuthenticationProtectsHealthAndMetrics(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	collectionCalls := 0
+	handler := NewHandlerWithToken(fixtureCollector{collect: func(context.Context) (metrics.Snapshot, error) {
+		collectionCalls++
+		return metrics.Snapshot{}, nil
+	}}, time.Second, testLogger(), token)
+
+	for _, path := range []string{"/api/v1/health", "/api/v1/metrics"} {
+		for _, authorization := range [][]string{
+			nil,
+			{"Bearer wrong-token"},
+			{"Basic " + token},
+			{"Bearer " + token, "Bearer " + token},
+		} {
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			for _, value := range authorization {
+				request.Header.Add("Authorization", value)
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			assertErrorResponse(t, recorder, http.StatusUnauthorized, "unauthorized")
+			if recorder.Header().Get("WWW-Authenticate") == "" || recorder.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("missing security response headers for %s: %v", path, recorder.Header())
+			}
+			if strings.Contains(recorder.Body.String(), token) {
+				t.Fatal("credential leaked in unauthorized response")
+			}
+		}
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Authorization", "bEaReR "+token)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK || recorder.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("valid credential rejected for %s: %d %s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+	if collectionCalls != 1 {
+		t.Fatalf("metrics collector called %d times; unauthorized requests must not collect", collectionCalls)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/metrics", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	assertErrorResponse(t, recorder, http.StatusUnauthorized, "unauthorized")
+	request.Header.Set("Authorization", "Bearer "+token)
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	assertErrorResponse(t, recorder, http.StatusMethodNotAllowed, "method_not_allowed")
+}
+
+func TestAPIAuthenticationRemainsOptIn(t *testing.T) {
+	for _, path := range []string{"/api/v1/health", "/api/v1/metrics"} {
+		recorder := httptest.NewRecorder()
+		NewHandler(fixtureCollector{}, time.Second, testLogger()).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("legacy unauthenticated request to %s returned %d", path, recorder.Code)
+		}
 	}
 }
 

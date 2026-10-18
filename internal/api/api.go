@@ -2,9 +2,12 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ch55secake/stardust/internal/metrics"
@@ -19,6 +22,8 @@ type Handler struct {
 	logger           *slog.Logger
 	servicePolicy    *services.Policy
 	serviceInspector services.Inspector
+	apiTokenHash     [sha256.Size]byte
+	apiAuthEnabled   bool
 }
 
 type MetricsCollector interface {
@@ -48,6 +53,16 @@ type APIError struct {
 }
 
 func NewHandler(collector MetricsCollector, requestTimeout time.Duration, logger *slog.Logger, options ...func(*Handler)) http.Handler {
+	return newHandler(collector, requestTimeout, logger, "", options...)
+}
+
+// NewHandlerWithToken enables bearer authentication for health and metrics
+// when apiToken is non-empty. The token is hashed and not retained by the handler.
+func NewHandlerWithToken(collector MetricsCollector, requestTimeout time.Duration, logger *slog.Logger, apiToken string, options ...func(*Handler)) http.Handler {
+	return newHandler(collector, requestTimeout, logger, apiToken, options...)
+}
+
+func newHandler(collector MetricsCollector, requestTimeout time.Duration, logger *slog.Logger, apiToken string, options ...func(*Handler)) http.Handler {
 	if requestTimeout <= 0 {
 		requestTimeout = 5 * time.Second
 	}
@@ -55,6 +70,10 @@ func NewHandler(collector MetricsCollector, requestTimeout time.Duration, logger
 		logger = slog.Default()
 	}
 	handler := &Handler{collector: collector, requestTimeout: requestTimeout, logger: logger}
+	if apiToken != "" {
+		handler.apiTokenHash = sha256.Sum256([]byte(apiToken))
+		handler.apiAuthEnabled = true
+	}
 	for _, option := range options {
 		option(handler)
 	}
@@ -67,6 +86,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.URL.Path {
 	case "/api/v1/health":
+		w.Header().Set("Cache-Control", "no-store")
+		if !h.authorize(w, r) {
+			return
+		}
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			h.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only GET is supported")
@@ -74,6 +97,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.health(w)
 	case "/api/v1/metrics":
+		w.Header().Set("Cache-Control", "no-store")
+		if !h.authorize(w, r) {
+			return
+		}
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			h.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only GET is supported")
@@ -83,6 +110,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		h.writeError(w, http.StatusNotFound, "not_found", "endpoint not found")
 	}
+}
+
+func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) bool {
+	if !h.apiAuthEnabled {
+		return true
+	}
+	values := r.Header.Values("Authorization")
+	if len(values) == 1 {
+		scheme, token, found := strings.Cut(values[0], " ")
+		if found && strings.EqualFold(scheme, "Bearer") && token != "" && !strings.ContainsAny(token, " \t\r\n") {
+			hash := sha256.Sum256([]byte(token))
+			if subtle.ConstantTimeCompare(hash[:], h.apiTokenHash[:]) == 1 {
+				return true
+			}
+		}
+	}
+	w.Header().Set("WWW-Authenticate", `Bearer realm="stardust"`)
+	h.writeError(w, http.StatusUnauthorized, "unauthorized", "a valid bearer token is required")
+	return false
 }
 
 func (h *Handler) health(w http.ResponseWriter) {

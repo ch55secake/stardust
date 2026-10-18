@@ -20,6 +20,7 @@ func main() {
 	showVersion := flag.Bool("version", false, "print the Stardust version")
 	servicePolicyFile := flag.String("service-policy-file", "", "private JSON file containing service read token and exact unit allowlist (disabled by default)")
 	flag.StringVar(&cfg.ListenAddress, "listen", cfg.ListenAddress, "TCP listen address")
+	flag.StringVar(&cfg.APITokenFile, "api-token-file", "", "private file containing the optional health/metrics bearer token")
 	flag.DurationVar(&cfg.CollectionTimeout, "collection-timeout", cfg.CollectionTimeout, "maximum time allowed for metric collection")
 	flag.DurationVar(&cfg.RequestTimeout, "request-timeout", cfg.RequestTimeout, "maximum time allowed for an HTTP request")
 	flag.StringVar(&cfg.DiskPath, "disk-path", cfg.DiskPath, "filesystem path to measure")
@@ -31,6 +32,11 @@ func main() {
 	}
 	if err := cfg.Validate(); err != nil {
 		slog.Error("invalid configuration", "error", err)
+		os.Exit(2)
+	}
+	apiToken, err := config.ReadAPITokenFile(cfg.APITokenFile)
+	if err != nil {
+		slog.Error("invalid API token file", "error", err)
 		os.Exit(2)
 	}
 
@@ -46,7 +52,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := agent.NewServer(cfg, logger).Run(ctx); err != nil {
+	if err := agent.NewServerWithAPIToken(cfg, logger, apiToken).Run(ctx); err != nil {
 		logger.Error("stardust stopped with an error", "error", err)
 		os.Exit(1)
 	}
