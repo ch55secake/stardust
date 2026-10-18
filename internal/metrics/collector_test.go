@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -40,8 +41,8 @@ func fixtureCollector(timeout time.Duration, diskPath string) *Collector {
 		},
 		networkCounters: func(context.Context) ([]psnet.IOCountersStat, error) {
 			return []psnet.IOCountersStat{
-				{BytesRecv: 100, BytesSent: 50, PacketsRecv: 10, PacketsSent: 5},
-				{BytesRecv: 200, BytesSent: 75, PacketsRecv: 20, PacketsSent: 8},
+				{Name: "lo", BytesRecv: 200, BytesSent: 75, PacketsRecv: 20, PacketsSent: 8},
+				{Name: "eth0", BytesRecv: 100, BytesSent: 50, PacketsRecv: 10, PacketsSent: 5},
 			}, nil
 		},
 	}
@@ -68,12 +69,42 @@ func TestCollectorBuildsSnapshotAndAggregatesNetworkCounters(t *testing.T) {
 	if snapshot.Disk != (Disk{Path: "/fixture", UsedBytes: 100, TotalBytes: 1000, UsedPercent: 10}) {
 		t.Fatalf("disk = %+v, want fixture disk", snapshot.Disk)
 	}
-	wantNetwork := Network{BytesReceived: 300, BytesSent: 125, PacketsReceived: 30, PacketsSent: 13}
-	if snapshot.Network != wantNetwork {
+	wantNetwork := Network{
+		BytesReceived:   300,
+		BytesSent:       125,
+		PacketsReceived: 30,
+		PacketsSent:     13,
+		Interfaces: []NetworkInterface{
+			{Name: "eth0", BytesReceived: 100, BytesSent: 50, PacketsReceived: 10, PacketsSent: 5},
+			{Name: "lo", BytesReceived: 200, BytesSent: 75, PacketsReceived: 20, PacketsSent: 8},
+		},
+	}
+	if !reflect.DeepEqual(snapshot.Network, wantNetwork) {
 		t.Fatalf("network = %+v, want %+v", snapshot.Network, wantNetwork)
 	}
 	if len(snapshot.Errors) != 0 {
 		t.Fatalf("errors = %+v, want none", snapshot.Errors)
+	}
+}
+
+func TestCollectorReportsNetworkFailureAsPartialMetric(t *testing.T) {
+	collector := fixtureCollector(time.Second, "/fixture")
+	collector.functions.networkCounters = func(context.Context) ([]psnet.IOCountersStat, error) {
+		return nil, errors.New("network counters unavailable")
+	}
+
+	snapshot, err := collector.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if snapshot.CPU.LogicalCores != 4 || snapshot.Memory.TotalBytes != 2000 {
+		t.Fatalf("other metrics missing from partial snapshot: %+v", snapshot)
+	}
+	if snapshot.Network.Interfaces == nil || len(snapshot.Network.Interfaces) != 0 {
+		t.Fatalf("network interfaces = %+v, want an empty array", snapshot.Network.Interfaces)
+	}
+	if len(snapshot.Errors) != 1 || snapshot.Errors[0] != (MetricError{Metric: "network", Message: "network counters unavailable"}) {
+		t.Fatalf("errors = %+v, want one network metric error", snapshot.Errors)
 	}
 }
 
