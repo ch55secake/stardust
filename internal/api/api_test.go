@@ -40,7 +40,12 @@ func TestMetricsReturnsCompleteFixture(t *testing.T) {
 			PlatformVersion: "24.04",
 			KernelArch:      "x86_64",
 		},
-		CPU:    metrics.CPU{UsagePercent: 12.5, LogicalCores: 4},
+		CPU: metrics.CPU{
+			UsagePercent:        12.5,
+			LogicalCores:        4,
+			PerCoreUsagePercent: []float64{10, 15, 20, 5},
+			LoadAverage:         &metrics.LoadAverage{OneMinute: 0.5, FiveMinutes: 0.75, FifteenMinutes: 1.25},
+		},
 		Memory: metrics.Memory{UsedBytes: 1000, TotalBytes: 2000, UsedPercent: 50},
 		Swap:   metrics.Swap{TotalBytes: 1000, UsedBytes: 300, FreeBytes: 700, UsedPercent: 30},
 		Disk:   metrics.Disk{Path: "/", UsedBytes: 1000, TotalBytes: 2000, UsedPercent: 50},

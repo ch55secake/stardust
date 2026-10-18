@@ -2,12 +2,14 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
+	"github.com/shirou/gopsutil/v4/load"
 	"github.com/shirou/gopsutil/v4/mem"
 	psnet "github.com/shirou/gopsutil/v4/net"
 )
@@ -42,8 +44,16 @@ type OSInfo struct {
 }
 
 type CPU struct {
-	UsagePercent float64 `json:"usage_percent"`
-	LogicalCores int     `json:"logical_cores"`
+	UsagePercent        float64      `json:"usage_percent"`
+	LogicalCores        int          `json:"logical_cores"`
+	PerCoreUsagePercent []float64    `json:"per_core_usage_percent"`
+	LoadAverage         *LoadAverage `json:"load_average,omitempty"`
+}
+
+type LoadAverage struct {
+	OneMinute      float64 `json:"one_minute"`
+	FiveMinutes    float64 `json:"five_minutes"`
+	FifteenMinutes float64 `json:"fifteen_minutes"`
 }
 
 type Memory struct {
@@ -89,13 +99,15 @@ type Collector struct {
 }
 
 type collectorFunctions struct {
-	hostInfo        func(context.Context) (*host.InfoStat, error)
-	cpuPercent      func(context.Context) ([]float64, error)
-	logicalCores    func(context.Context) (int, error)
-	virtualMemory   func(context.Context) (*mem.VirtualMemoryStat, error)
-	swapMemory      func(context.Context) (*mem.SwapMemoryStat, error)
-	diskUsage       func(context.Context, string) (*disk.UsageStat, error)
-	networkCounters func(context.Context) ([]psnet.IOCountersStat, error)
+	hostInfo          func(context.Context) (*host.InfoStat, error)
+	cpuPercent        func(context.Context) ([]float64, error)
+	cpuPercentPerCore func(context.Context) ([]float64, error)
+	logicalCores      func(context.Context) (int, error)
+	loadAverage       func(context.Context) (*load.AvgStat, error)
+	virtualMemory     func(context.Context) (*mem.VirtualMemoryStat, error)
+	swapMemory        func(context.Context) (*mem.SwapMemoryStat, error)
+	diskUsage         func(context.Context, string) (*disk.UsageStat, error)
+	networkCounters   func(context.Context) ([]psnet.IOCountersStat, error)
 }
 
 func NewCollector(timeout time.Duration, diskPath string) *Collector {
@@ -109,12 +121,14 @@ func NewCollector(timeout time.Duration, diskPath string) *Collector {
 		timeout:  timeout,
 		diskPath: diskPath,
 		functions: collectorFunctions{
-			hostInfo:      host.InfoWithContext,
-			cpuPercent:    func(ctx context.Context) ([]float64, error) { return cpu.PercentWithContext(ctx, 0, false) },
-			logicalCores:  func(ctx context.Context) (int, error) { return cpu.CountsWithContext(ctx, true) },
-			virtualMemory: mem.VirtualMemoryWithContext,
-			swapMemory:    mem.SwapMemoryWithContext,
-			diskUsage:     disk.UsageWithContext,
+			hostInfo:          host.InfoWithContext,
+			cpuPercent:        func(ctx context.Context) ([]float64, error) { return cpu.PercentWithContext(ctx, 0, false) },
+			cpuPercentPerCore: func(ctx context.Context) ([]float64, error) { return cpu.PercentWithContext(ctx, 0, true) },
+			logicalCores:      func(ctx context.Context) (int, error) { return cpu.CountsWithContext(ctx, true) },
+			loadAverage:       load.AvgWithContext,
+			virtualMemory:     mem.VirtualMemoryWithContext,
+			swapMemory:        mem.SwapMemoryWithContext,
+			diskUsage:         disk.UsageWithContext,
 			networkCounters: func(ctx context.Context) ([]psnet.IOCountersStat, error) {
 				return psnet.IOCountersWithContext(ctx, true)
 			},
@@ -154,6 +168,7 @@ func (c *Collector) Collect(ctx context.Context) (Snapshot, error) {
 		return snapshot, err
 	}
 
+	snapshot.CPU.PerCoreUsagePercent = []float64{}
 	percent, err := c.functions.cpuPercent(ctx)
 	if err != nil {
 		addError("cpu", err)
@@ -163,11 +178,35 @@ func (c *Collector) Collect(ctx context.Context) (Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return snapshot, err
 	}
+	perCorePercent, err := c.functions.cpuPercentPerCore(ctx)
+	if err != nil {
+		addError("cpu", err)
+	} else {
+		snapshot.CPU.PerCoreUsagePercent = append(snapshot.CPU.PerCoreUsagePercent, perCorePercent...)
+	}
+	if err := ctx.Err(); err != nil {
+		return snapshot, err
+	}
 	cores, err := c.functions.logicalCores(ctx)
 	if err != nil {
 		addError("cpu", err)
 	} else {
 		snapshot.CPU.LogicalCores = cores
+	}
+	if err := ctx.Err(); err != nil {
+		return snapshot, err
+	}
+	loadAverage, err := c.functions.loadAverage(ctx)
+	if err != nil {
+		addError("load_average", err)
+	} else if loadAverage == nil {
+		addError("load_average", errors.New("load averages unavailable"))
+	} else {
+		snapshot.CPU.LoadAverage = &LoadAverage{
+			OneMinute:      loadAverage.Load1,
+			FiveMinutes:    loadAverage.Load5,
+			FifteenMinutes: loadAverage.Load15,
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return snapshot, err

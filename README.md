@@ -108,7 +108,13 @@ Metric semantics:
 - `cpu.usage_percent` is the system-wide, non-blocking CPU usage delta since
   the previous CPU sample, not an instantaneous reading or a fixed-interval
   average. The first sample can be unavailable until a baseline exists.
-  `logical_cores` is the count of online logical CPUs.
+  `logical_cores` is the count of online logical CPUs. `per_core_usage_percent`
+  contains a non-blocking usage percentage for each logical CPU, in the order
+  reported by the OS metrics library; each value ranges from 0 to 100. These
+  values are deltas since the previous per-core sample. `load_average` contains
+  the 1-, 5-, and 15-minute scheduling load averages where supported (Linux and
+  macOS); it is omitted and reported in `data.errors` when unavailable. Load
+  averages are not percentages and can exceed the logical CPU count.
 - `memory` reports host virtual memory used/total bytes and used percentage as
   provided by the OS metrics library.
 - `swap` reports swap total, used, and free bytes and used percentage. A zero
@@ -139,7 +145,16 @@ returns HTTP 503.
       "platform_version": "24.04",
       "kernel_arch": "x86_64"
     },
-    "cpu": {"usage_percent": 12.5, "logical_cores": 4},
+    "cpu": {
+      "usage_percent": 12.5,
+      "logical_cores": 4,
+      "per_core_usage_percent": [10, 15, 20, 5],
+      "load_average": {
+        "one_minute": 0.5,
+        "five_minutes": 0.75,
+        "fifteen_minutes": 1.25
+      }
+    },
     "memory": {"used_bytes": 1000, "total_bytes": 2000, "used_percent": 50},
     "swap": {"total_bytes": 1000, "used_bytes": 300, "free_bytes": 700, "used_percent": 30},
     "disk": {"path": "/", "used_bytes": 1000, "total_bytes": 2000, "used_percent": 50},
