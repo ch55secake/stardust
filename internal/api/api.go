@@ -8,14 +8,17 @@ import (
 	"time"
 
 	"github.com/ch55secake/stardust/internal/metrics"
+	"github.com/ch55secake/stardust/internal/services"
 )
 
 const Version = "v1"
 
 type Handler struct {
-	collector      MetricsCollector
-	requestTimeout time.Duration
-	logger         *slog.Logger
+	collector        MetricsCollector
+	requestTimeout   time.Duration
+	logger           *slog.Logger
+	servicePolicy    *services.Policy
+	serviceInspector services.Inspector
 }
 
 type MetricsCollector interface {
@@ -44,17 +47,24 @@ type APIError struct {
 	Message string `json:"message"`
 }
 
-func NewHandler(collector MetricsCollector, requestTimeout time.Duration, logger *slog.Logger) http.Handler {
+func NewHandler(collector MetricsCollector, requestTimeout time.Duration, logger *slog.Logger, options ...func(*Handler)) http.Handler {
 	if requestTimeout <= 0 {
 		requestTimeout = 5 * time.Second
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Handler{collector: collector, requestTimeout: requestTimeout, logger: logger}
+	handler := &Handler{collector: collector, requestTimeout: requestTimeout, logger: logger}
+	for _, option := range options {
+		option(handler)
+	}
+	return handler
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.serviceRoute(w, r) {
+		return
+	}
 	switch r.URL.Path {
 	case "/api/v1/health":
 		if r.Method != http.MethodGet {

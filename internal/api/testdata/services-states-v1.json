@@ -1,0 +1,11 @@
+{
+  "api_version": "v1",
+  "data": {
+    "units": [
+      {"name":"active.service","id":"active.service","description":"Running worker","load_state":"loaded","active_state":"active","sub_state":"running","unit_file_state":"enabled","main_pid":123},
+      {"name":"failed.service","id":"failed.service","description":"Failed worker","load_state":"loaded","active_state":"failed","sub_state":"failed","unit_file_state":"disabled","main_pid":0},
+      {"name":"inactive.service","id":"inactive.service","description":"Stopped worker","load_state":"loaded","active_state":"inactive","sub_state":"dead","unit_file_state":"static","main_pid":0},
+      {"name":"missing.service","id":"missing.service","description":"","load_state":"not-found","active_state":"inactive","sub_state":"dead","unit_file_state":"","main_pid":0}
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "api_version": "v1",
+  "data": {
+    "units": [
+      {
+        "name": "a.service",
+        "id": "a.service",
+        "description": "",
+        "load_state": "loaded",
+        "active_state": "active",
+        "sub_state": "running",
+        "unit_file_state": "",
+        "main_pid": 42
+      }
+    ],
+    "next_cursor": "a.service"
+  }
+}

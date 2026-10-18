@@ -5,6 +5,8 @@ import (
 	"net"
 	"strconv"
 	"time"
+
+	"github.com/ch55secake/stardust/internal/services"
 )
 
 const (
@@ -20,6 +22,7 @@ type Config struct {
 	CollectionTimeout time.Duration
 	RequestTimeout    time.Duration
 	DiskPath          string
+	ServicePolicy     *services.Policy
 }
 
 func Default() Config {

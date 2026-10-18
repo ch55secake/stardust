@@ -200,6 +200,17 @@ returns HTTP 503.
 
 ## systemd
 
+### Read-only service inventory
+
+Optional authenticated service list/detail endpoints are documented in
+[`docs/services-api.md`](docs/services-api.md), including capability discovery,
+pagination, errors, and client credential handling. Inventory is disabled by
+default; enabling it requires a private policy file with a read token and exact
+unit allowlist. This does not grant log access or restart privileges, change the
+existing health/metrics policy, or add support for non-loopback listeners.
+
+### Installing the agent service
+
 On Linux, the installer does this setup automatically. To install manually
 (for example, from a source build), create a service account and install the
 binary and unit:
