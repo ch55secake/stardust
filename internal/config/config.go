@@ -134,11 +134,16 @@ func validateAPITokenDirectory(path string) error {
 	}
 	for {
 		info, err := os.Stat(directory)
-		if err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
+		if err != nil || !info.IsDir() {
 			return fmt.Errorf("API token file %q must be in root- or runtime-owned directories not writable by group or other users", path)
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || (stat.Uid != 0 && stat.Uid != uint32(os.Geteuid())) {
+			return fmt.Errorf("API token file %q must be in root- or runtime-owned directories not writable by group or other users", path)
+		}
+		writableByOthers := info.Mode().Perm()&0o022 != 0
+		rootStickyDirectory := stat.Uid == 0 && info.Mode()&os.ModeSticky != 0
+		if writableByOthers && !rootStickyDirectory {
 			return fmt.Errorf("API token file %q must be in root- or runtime-owned directories not writable by group or other users", path)
 		}
 		parent := filepath.Dir(directory)
