@@ -9,15 +9,98 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
-    uses: ch55secake/cheesecake-factory/.github/workflows/release.yml@92e4441efa5a11f9c3f704a5ce48cf752cde38de
-    with:
-      binary-name: stardust
-      build-package: ./cmd/stardust
-      cgo-enabled: '0'
-      ldflags: -s -w -X main.version={{.Version}}
-      go-version-file: go.mod
-      targets: '[{"goos":"linux","goarch":"amd64"},{"goos":"linux","goarch":"arm64"},{"goos":"darwin","goarch":"amd64"},{"goos":"darwin","goarch":"arm64"}]'
+    name: release
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
     permissions:
       contents: write
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: set-up-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: download-dependencies
+        run: go mod download
+
+      - name: prepare-release-signing-key
+        env:
+          STARDUST_RELEASE_SIGNING_KEY: ${{ secrets.STARDUST_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$STARDUST_RELEASE_SIGNING_KEY" ]] || {
+            echo 'STARDUST_RELEASE_SIGNING_KEY is not configured' >&2
+            exit 1
+          }
+          key_file="$RUNNER_TEMP/stardust-release-signing-key.pem"
+          (umask 077; printf '%s\n' "$STARDUST_RELEASE_SIGNING_KEY" > "$key_file")
+          openssl pkey -in "$key_file" -check -noout
+          echo "STARDUST_RELEASE_SIGNING_KEY_FILE=$key_file" >> "$GITHUB_ENV"
+
+      - name: resolve-release-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          latest_major=0
+          latest_minor=0
+          latest_patch=0
+          found_release=false
+
+          while IFS= read -r tag; do
+            if [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              major=${BASH_REMATCH[1]}
+              minor=${BASH_REMATCH[2]}
+              patch=${BASH_REMATCH[3]}
+
+              if [[ "$found_release" == false ]] ||
+                (( major > latest_major )) ||
+                (( major == latest_major && minor > latest_minor )) ||
+                (( major == latest_major && minor == latest_minor && patch > latest_patch )); then
+                latest_major=$major
+                latest_minor=$minor
+                latest_patch=$patch
+                found_release=true
+              fi
+            fi
+          done < <(gh api --paginate "repos/$REPOSITORY/releases?per_page=100" --jq '.[] | select(.draft == false) | .tag_name')
+
+          if [[ "$found_release" == true ]]; then
+            major=$latest_major
+            minor=$latest_minor
+            patch=$((latest_patch + 1))
+          else
+            major=1
+            minor=0
+            patch=0
+          fi
+          release_tag="v$major.$minor.$patch"
+
+          if git show-ref --tags --verify --quiet "refs/tags/$release_tag"; then
+            echo "Tag $release_tag already exists" >&2
+            exit 1
+          fi
+          git tag "$release_tag" "$GITHUB_SHA"
+
+      - name: build-sign-and-publish-release
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --clean --config .goreleaser.yaml
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STARDUST_RELEASE_SIGNING_KEY_FILE: ${{ runner.temp }}/stardust-release-signing-key.pem

@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import plistlib
+import re
 import shutil
 import subprocess
 import tarfile
@@ -41,11 +42,17 @@ elif tool == "curl":
     fixtures = pathlib.Path(os.environ["STARDUST_FIXTURES"])
     if url.endswith("/checksums.txt"):
         name = "checksums-bad.txt" if os.environ.get("STARDUST_BAD_CHECKSUM") == "1" else "checksums.txt"
+    elif url.endswith("/checksums.txt.sig"):
+        if os.environ.get("STARDUST_MISSING_SIGNATURE") == "1":
+            sys.exit(22)
+        name = "checksums-bad.sig" if os.environ.get("STARDUST_BAD_SIGNATURE") == "1" else "checksums.txt.sig"
     else:
         name = url.rsplit("/", 1)[-1]
         if os.environ.get("STARDUST_FAIL_DOWNLOAD") == name:
             sys.exit(22)
     source = fixtures / name
+    if name.endswith(".tar.gz") and os.environ.get("STARDUST_TAMPER_ARCHIVE") == name:
+        source = fixtures / "tampered-archive.tar.gz"
     if not source.is_file():
         sys.exit(22)
     shutil.copyfile(source, output)
@@ -221,6 +228,19 @@ class InstallerRegressionTests(unittest.TestCase):
         self.fixtures.mkdir()
         self.stubs.mkdir()
         self.curl_log = self.root / "curl.log"
+        self.signing_key = self.root / "test-signing-key.pem"
+        self.public_key = self.root / "test-release-public-key.pem"
+        subprocess.run(
+            ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", str(self.signing_key)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["openssl", "pkey", "-in", str(self.signing_key), "-pubout", "-out", str(self.public_key)],
+            check=True,
+            capture_output=True,
+        )
+        self.public_key_text = self.public_key.read_text(encoding="utf-8").strip()
         self.assets = {}
         checksums = []
 
@@ -239,12 +259,24 @@ class InstallerRegressionTests(unittest.TestCase):
                 self.assets[(goos, goarch)] = (name, payload)
 
         (self.fixtures / "checksums.txt").write_text("\n".join(checksums) + "\n")
+        subprocess.run(
+            [
+                "openssl", "dgst", "-sha256", "-sign", str(self.signing_key),
+                "-out", str(self.fixtures / "checksums.txt.sig"), str(self.fixtures / "checksums.txt"),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        bad_signature = bytearray((self.fixtures / "checksums.txt.sig").read_bytes())
+        bad_signature[0] ^= 1
+        (self.fixtures / "checksums-bad.sig").write_bytes(bad_signature)
         bad_checksums = []
         for entry in checksums:
             digest, name = entry.split()
             replacement = ("0" if digest[0] != "0" else "1") + digest[1:]
             bad_checksums.append(f"{replacement}  {name}")
         (self.fixtures / "checksums-bad.txt").write_text("\n".join(bad_checksums) + "\n")
+        (self.fixtures / "tampered-archive.tar.gz").write_bytes(b"tampered release archive")
         shutil.copyfile(REPO_ROOT / "deploy/systemd/stardust.service", self.fixtures / "stardust.service")
         shutil.copyfile(
             REPO_ROOT / "deploy/launchd/com.ch55secake.stardust.plist",
@@ -275,6 +307,18 @@ class InstallerRegressionTests(unittest.TestCase):
             "uuidgen",
         ):
             (self.stubs / name).symlink_to(fake_tool)
+
+        self.test_installer = self.root / "install.sh"
+        self.test_installer.write_text(self._installer_script(), encoding="utf-8")
+        self.test_installer.chmod(0o755)
+
+    def _installer_script(self):
+        script = INSTALLER.read_text(encoding="utf-8")
+        pattern = r"(?<=trusted_release_public_keys=\(\n')[\s\S]*?(?='\n\))"
+        script, count = re.subn(pattern, lambda _: self.public_key_text, script, count=1)
+        if count != 1:
+            raise AssertionError("could not replace the release verification test key")
+        return script
 
     def _env(self, goos="Linux", machine="x86_64", **overrides):
         env = os.environ.copy()
@@ -312,7 +356,7 @@ class InstallerRegressionTests(unittest.TestCase):
         return env
 
     def _run_installer(self, install_dir, *, version=None, env=None):
-        command = ["bash", str(INSTALLER), "--no-service", "--install-dir", str(install_dir)]
+        command = ["bash", str(self.test_installer), "--no-service", "--install-dir", str(install_dir)]
         if version is not None:
             command.extend(("--version", version))
         return subprocess.run(
@@ -337,7 +381,7 @@ class InstallerRegressionTests(unittest.TestCase):
         state.mkdir()
         account_log = case_dir / "account.log"
 
-        script = INSTALLER.read_text()
+        script = self._installer_script()
         root_check = '\t\t(( EUID == 0 )) || fail "systemd installation requires root; use sudo or pass --no-service"\n'
         self.assertIn(root_check, script)
         # Run the service path without root; all privileged writes target this temp directory.
@@ -384,7 +428,7 @@ class InstallerRegressionTests(unittest.TestCase):
         log_dir = case_dir / "Library" / "Logs" / "Stardust"
         plist_path = launchd_dir / "com.ch55secake.stardust.plist"
 
-        script = INSTALLER.read_text()
+        script = self._installer_script()
         root_check = '\t\t(( EUID == 0 )) || fail "macOS LaunchDaemon installation requires sudo; rerun with sudo or pass --no-service"\n'
         self.assertIn(root_check, script)
         # Exercise service setup with privileged destinations redirected into this test's temp directory.
@@ -441,6 +485,7 @@ class InstallerRegressionTests(unittest.TestCase):
                 requests = self.curl_log.read_text().splitlines()
                 release_path = f"/releases/download/{version}/" if version else "/releases/latest/download/"
                 self.assertIn(f"https://github.com/ch55secake/stardust{release_path}checksums.txt", requests)
+                self.assertIn(f"https://github.com/ch55secake/stardust{release_path}checksums.txt.sig", requests)
                 self.assertIn(f"https://github.com/ch55secake/stardust{release_path}{name}", requests)
 
     def test_macos_service_install_creates_a_dedicated_unprivileged_account(self):
@@ -628,7 +673,7 @@ class InstallerRegressionTests(unittest.TestCase):
                 self.assertIn(message, result.stderr)
                 self.assertEqual((install_dir / "stardust").read_bytes(), b"existing binary")
 
-    def test_checksum_failure_does_not_replace_existing_install(self):
+    def test_tampered_checksums_do_not_replace_existing_install(self):
         install_dir = self.root / "existing-install"
         install_dir.mkdir()
         installed = install_dir / "stardust"
@@ -638,6 +683,48 @@ class InstallerRegressionTests(unittest.TestCase):
             install_dir,
             version="v1.2.3",
             env=self._env(STARDUST_BAD_CHECKSUM="1"),
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("release checksum signature verification failed", result.stderr)
+        requests = self.curl_log.read_text().splitlines()
+        self.assertFalse(any(url.endswith(".tar.gz") for url in requests))
+        self.assertEqual(installed.read_bytes(), b"existing binary")
+
+    def test_missing_or_tampered_signature_does_not_replace_existing_install(self):
+        for name, overrides, error in (
+            ("missing-signature", {"STARDUST_MISSING_SIGNATURE": "1"}, "could not download signed release checksums"),
+            ("tampered-signature", {"STARDUST_BAD_SIGNATURE": "1"}, "release checksum signature verification failed"),
+        ):
+            with self.subTest(name=name):
+                install_dir = self.root / name
+                install_dir.mkdir()
+                installed = install_dir / "stardust"
+                installed.write_bytes(b"existing binary")
+
+                result = self._run_installer(
+                    install_dir,
+                    version="v1.2.3",
+                    env=self._env(**overrides),
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(error, result.stderr)
+                requests = self.curl_log.read_text().splitlines()
+                self.assertFalse(any(url.endswith(".tar.gz") for url in requests))
+                self.assertEqual(installed.read_bytes(), b"existing binary")
+
+    def test_tampered_archive_does_not_replace_existing_install(self):
+        install_dir = self.root / "tampered-archive-install"
+        install_dir.mkdir()
+        installed = install_dir / "stardust"
+        installed.write_bytes(b"existing binary")
+        archive_name = self.assets[("linux", "amd64")][0]
+
+        result = self._run_installer(
+            install_dir,
+            version="v1.2.3",
+            env=self._env(STARDUST_TAMPER_ARCHIVE=archive_name),
         )
 
         self.assertNotEqual(result.returncode, 0)

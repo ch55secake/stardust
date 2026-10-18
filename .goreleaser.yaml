@@ -23,9 +23,24 @@ builds:
 
 archives:
   - formats: [tar.gz]
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
 
 checksum:
   name_template: checksums.txt
+
+signs:
+  - id: checksums
+    cmd: openssl
+    args:
+      - dgst
+      - -sha256
+      - -sign
+      - '{{ .Env.STARDUST_RELEASE_SIGNING_KEY_FILE }}'
+      - -out
+      - '${signature}'
+      - '${artifact}'
+    signature: '${artifact}.sig'
+    artifacts: checksum
 
 release:
   prerelease: auto

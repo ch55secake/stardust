@@ -5,6 +5,19 @@ repo="ch55secake/stardust"
 install_dir="${STARDUST_INSTALL_DIR:-}"
 version=""
 install_service=true
+trusted_release_public_keys=(
+'-----BEGIN PUBLIC KEY-----
+MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAsE8IMKMvZ2rFpW9n/PYJ
+Sg/QveK7C0MhpOLb9WjnO9NtqWIqaNh/iIwZaYUUpBhbf5wrqiFZTQN2K73+i4NQ
+0b254yUPjsz7FkZY2Ynh9IFZlPl3ZESi668/8ER8a/EgDiQRaxmqMillXmL5Hdmq
+qgptWxfFcCzeThZTsvevoDnnSTcUQJL4qWPAwE1lOLlnaL0OGYX6nyrjtPORJDKF
+NZ6p+WWoAXC3BPUqt6LMSFzekgf1+HxYG24nffxAfk8QeK85OJd2QLFSRTvlR0iG
+OBANmkGBfQ5oQ28C5WugjD3xajnx3HzE/+ENp3PNtlDjpeRwbFDRxbXT+O2YQk9e
+avtH93zk5/SF+7FLyuTaI22vXmJsVsC/2mwLpC8qT4G0WxCBp3s9N4zT6ByJ/Vp1
+6bnMnyf52Dt6tsfvJMb+lCx7yHeJUyYuKnDBWQ1anWktNMlQHut3+x6ObtVwA0Cf
+/VXzJnAUmY/bheANHj0JYC3kW4EzHMnaXWAYgFcMzPc1AgMBAAE=
+-----END PUBLIC KEY-----'
+)
 
 usage() {
 	cat <<'EOF'
@@ -291,7 +304,7 @@ aarch64|arm64) arch=arm64 ;;
 *) fail "unsupported architecture: $(uname -m) (supported: x86_64, aarch64)" ;;
 esac
 
-for tool in curl tar awk install mktemp; do
+for tool in curl tar awk install mktemp openssl; do
 	command -v "$tool" >/dev/null 2>&1 || fail "required command not found: $tool"
 done
 case "$goos" in
@@ -346,6 +359,19 @@ trap cleanup EXIT
 checksums_path="${tmp_dir}/checksums.txt"
 curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
 	--output "$checksums_path" "${release_url}/checksums.txt" || fail "could not download release checksums"
+signature_path="${tmp_dir}/checksums.txt.sig"
+curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+	--output "$signature_path" "${release_url}/checksums.txt.sig" || fail "could not download signed release checksums"
+signature_verified=false
+for key_index in "${!trusted_release_public_keys[@]}"; do
+	trusted_key_path="${tmp_dir}/release-public-key-${key_index}.pem"
+	printf '%s\n' "${trusted_release_public_keys[$key_index]}" > "$trusted_key_path"
+	if openssl dgst -sha256 -verify "$trusted_key_path" -signature "$signature_path" "$checksums_path" >/dev/null 2>&1; then
+		signature_verified=true
+		break
+	fi
+done
+[[ "$signature_verified" == true ]] || fail "release checksum signature verification failed"
 
 archive_name="$(awk -v arch="$arch" \
 	-v goos="$goos" \
