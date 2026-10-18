@@ -44,7 +44,7 @@ func (c Config) Validate() error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("listen address %q is not supported: Stardust has no authentication or TLS and only serves numeric loopback addresses; use SSH port forwarding for remote access", c.ListenAddress)
+		return fmt.Errorf("listen address %q is not supported: Stardust only serves numeric loopback addresses; use SSH port forwarding for remote access", c.ListenAddress)
 	}
 	port, err := strconv.ParseUint(portString, 10, 16)
 	if err != nil || port == 0 {

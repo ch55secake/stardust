@@ -10,7 +10,11 @@
         "active_state": "active",
         "sub_state": "running",
         "unit_file_state": "",
-        "main_pid": 42
+        "main_pid": 42,
+        "main_process": {
+          "name": "worker",
+          "effective_uid": 1001
+        }
       }
     ],
     "next_cursor": "a.service"

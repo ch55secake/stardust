@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,7 +30,7 @@ func (f *fakeInspector) Inspect(ctx context.Context, name string) (services.Unit
 	if f.inspect != nil {
 		return f.inspect(ctx, name)
 	}
-	return services.Unit{Name: name, ID: name, LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 42}, nil
+	return services.Unit{Name: name, ID: name, LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 42, MainProcess: &services.ProcessIdentity{Name: "worker", EffectiveUID: 1001}}, nil
 }
 
 func serviceHandler(t *testing.T, inspector *fakeInspector, names ...string) http.Handler {
@@ -92,12 +93,29 @@ func TestServiceAuthorizationAndMethods(t *testing.T) {
 	}
 }
 
+func TestServiceBearerSchemeIsCaseInsensitive(t *testing.T) {
+	handler := serviceHandler(t, &fakeInspector{supported: true}, "a.service")
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/services", nil)
+	request.Header.Set("Authorization", "bEaReR "+serviceToken)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("mixed-case bearer scheme rejected: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestServiceCapabilitiesDisabledUnsupportedAndEmpty(t *testing.T) {
 	disabled := NewHandler(fixtureCollector{}, time.Second, testLogger())
 	for _, handler := range []http.Handler{disabled, serviceHandler(t, &fakeInspector{}), serviceHandler(t, &fakeInspector{supported: true})} {
 		recorder := serviceRequest(handler, "GET", "/api/v1/capabilities", "")
 		if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"restart":false`) || !strings.Contains(recorder.Body.String(), `"logs":false`) {
 			t.Fatal(recorder.Body.String())
+		}
+		var response struct {
+			Timestamp time.Time `json:"timestamp"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil || response.Timestamp.IsZero() {
+			t.Fatalf("capability timestamp missing or invalid: %s (%v)", recorder.Body.String(), err)
 		}
 	}
 	if recorder := serviceRequest(disabled, "GET", "/api/v1/services", serviceToken); recorder.Code != 503 || !strings.Contains(recorder.Body.String(), "services_disabled") {
@@ -126,12 +144,13 @@ func TestServicePaginationFilteringAndLiveDetails(t *testing.T) {
 	recorder := serviceRequest(handler, "GET", "/api/v1/services?limit=1", serviceToken)
 	var response struct {
 		APIVersion string      `json:"api_version"`
+		Timestamp  time.Time   `json:"timestamp"`
 		Data       ServicePage `json:"data"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if recorder.Code != 200 || response.APIVersion != Version || len(response.Data.Units) != 1 || response.Data.NextCursor != "a.service" {
+	if recorder.Code != 200 || response.APIVersion != Version || response.Timestamp.IsZero() || len(response.Data.Units) != 1 || response.Data.NextCursor != "a.service" {
 		t.Fatal(recorder.Body.String())
 	}
 	if recorder.Header().Get("Cache-Control") != "no-store" {
@@ -152,12 +171,19 @@ func TestServicePaginationFilteringAndLiveDetails(t *testing.T) {
 	pid := uint32(10)
 	inspector.inspect = func(_ context.Context, name string) (services.Unit, error) {
 		pid++
-		return services.Unit{Name: name, ID: "canonical.service", MainPID: pid, ActiveState: "failed", SubState: "failed"}, nil
+		return services.Unit{Name: name, ID: "canonical.service", MainPID: pid, MainProcess: &services.ProcessIdentity{Name: "worker", EffectiveUID: pid}, ActiveState: "failed", SubState: "failed"}, nil
 	}
-	for _, want := range []string{`"main_pid":11`, `"main_pid":12`} {
+	for index, want := range []string{`"main_pid":11`, `"main_pid":12`} {
 		recorder = serviceRequest(handler, "GET", "/api/v1/services/a.service", serviceToken)
-		if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), want) || !strings.Contains(recorder.Body.String(), `"id":"canonical.service"`) {
+		wantUID := uint32(11 + index)
+		if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), want) || !strings.Contains(recorder.Body.String(), `"id":"canonical.service"`) || !strings.Contains(recorder.Body.String(), fmt.Sprintf(`"effective_uid":%d`, wantUID)) {
 			t.Fatal(recorder.Body.String())
+		}
+		var detail struct {
+			Timestamp time.Time `json:"timestamp"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &detail); err != nil || detail.Timestamp.IsZero() {
+			t.Fatalf("detail timestamp missing or invalid: %s (%v)", recorder.Body.String(), err)
 		}
 	}
 }
@@ -183,6 +209,7 @@ func TestServiceErrorsAndDeadlines(t *testing.T) {
 	}{
 		{services.ErrNotFound, 404, "unit_not_found"},
 		{services.ErrForbidden, 403, "unit_forbidden"},
+		{services.ErrPermissionDenied, 503, "services_permission_denied"},
 		{services.ErrUnsupported, 501, "services_unsupported"},
 		{errors.New("permission denied: sensitive details"), 503, "services_unavailable"},
 		{context.DeadlineExceeded, 504, "services_timeout"},
@@ -223,6 +250,18 @@ func assertServiceFixture(t *testing.T, recorder *httptest.ResponseRecorder, nam
 	if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
+	gotObject, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("fixture %s response is not an object", name)
+	}
+	timestamp, ok := gotObject["timestamp"].(string)
+	if !ok {
+		t.Fatalf("fixture %s response omitted timestamp", name)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, timestamp); err != nil {
+		t.Fatalf("fixture %s has invalid timestamp %q: %v", name, timestamp, err)
+	}
+	delete(gotObject, "timestamp")
 	if recorder.Code != http.StatusOK || !reflect.DeepEqual(got, want) {
 		t.Fatalf("fixture %s mismatch: %d %s", name, recorder.Code, recorder.Body.String())
 	}
