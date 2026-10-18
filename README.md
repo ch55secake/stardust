@@ -108,6 +108,9 @@ Metric semantics:
   `logical_cores` is the count of online logical CPUs.
 - `memory` reports host virtual memory used/total bytes and used percentage as
   provided by the OS metrics library.
+- `swap` reports swap total, used, and free bytes and used percentage. A zero
+  total means the host has no configured swap; an unavailable metric is listed
+  in `data.errors` without failing the rest of the snapshot.
 - `disk` reports usage for the filesystem containing the configured
   `--disk-path`; sizes are bytes and the percentage is 0-100.
 - `network` reports cumulative bytes and packets sent/received, summed across
@@ -134,6 +137,7 @@ returns HTTP 503.
     },
     "cpu": {"usage_percent": 12.5, "logical_cores": 4},
     "memory": {"used_bytes": 1000, "total_bytes": 2000, "used_percent": 50},
+    "swap": {"total_bytes": 1000, "used_bytes": 300, "free_bytes": 700, "used_percent": 30},
     "disk": {"path": "/", "used_bytes": 1000, "total_bytes": 2000, "used_percent": 50},
     "uptime_seconds": 86400,
     "network": {
