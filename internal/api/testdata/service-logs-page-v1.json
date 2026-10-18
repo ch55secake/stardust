@@ -1,0 +1,17 @@
+{
+  "api_version": "v1",
+  "data": {
+    "unit": "web.service",
+    "entries": [
+      {
+        "timestamp": "2026-10-18T12:00:00Z",
+        "priority": 6,
+        "message": "started\nworker café ✓\u001b[31m",
+        "cursor": "opaque-cursor-1"
+      }
+    ],
+    "next_cursor": "opaque-cursor-older",
+    "latest_cursor": "opaque-cursor-1",
+    "has_more": true
+  }
+}

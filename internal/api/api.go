@@ -22,6 +22,9 @@ type Handler struct {
 	logger           *slog.Logger
 	servicePolicy    *services.Policy
 	serviceInspector services.Inspector
+	logPolicy        *services.Policy
+	journalReader    services.JournalReader
+	logSlots         chan struct{}
 	apiTokenHash     [sha256.Size]byte
 	apiAuthEnabled   bool
 }

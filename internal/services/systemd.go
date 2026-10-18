@@ -155,7 +155,11 @@ func runSystemctl(ctx context.Context, name string) ([]byte, error) {
 
 func hasPermissionDenial(stderr string) bool {
 	stderr = strings.ToLower(stderr)
-	return strings.Contains(stderr, "permission denied") || strings.Contains(stderr, "access denied") || strings.Contains(stderr, "not authorized")
+	return strings.Contains(stderr, "permission denied") ||
+		strings.Contains(stderr, "access denied") ||
+		strings.Contains(stderr, "not authorized") ||
+		strings.Contains(stderr, "insufficient permissions") ||
+		strings.Contains(stderr, "not seeing messages from the system")
 }
 
 func systemctlCommand(ctx context.Context, name string) *exec.Cmd {

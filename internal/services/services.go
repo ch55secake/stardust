@@ -54,6 +54,7 @@ type Inspector interface {
 type Policy struct {
 	tokenHash [32]byte
 	units     []string
+	logRead   *Policy
 }
 
 func ValidUnit(name string) bool {
@@ -61,6 +62,28 @@ func ValidUnit(name string) bool {
 }
 
 func NewPolicy(token string, units []string) (*Policy, error) {
+	return newPolicy(token, units)
+}
+
+// NewPolicyWithLogs enables an independently authenticated, independently
+// allowlisted journal-read capability. The log credential cannot be the service
+// inventory credential, preventing an inventory client from inheriting log access.
+func NewPolicyWithLogs(token string, units []string, logToken string, logUnits []string) (*Policy, error) {
+	policy, err := newPolicy(token, units)
+	if err != nil {
+		return nil, err
+	}
+	if token == logToken {
+		return nil, errors.New("service and log read tokens must be different")
+	}
+	policy.logRead, err = newPolicy(logToken, logUnits)
+	if err != nil {
+		return nil, fmt.Errorf("invalid log read policy: %w", err)
+	}
+	return policy, nil
+}
+
+func newPolicy(token string, units []string) (*Policy, error) {
 	if len(token) < 32 || len(token) > 256 || strings.IndexFunc(token, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {
 		return nil, errors.New("service token must contain 32–256 printable non-space ASCII characters")
 	}
@@ -104,6 +127,10 @@ func LoadPolicy(path string) (*Policy, error) {
 	var config struct {
 		Token string   `json:"token"`
 		Units []string `json:"units"`
+		Logs  *struct {
+			Token string   `json:"token"`
+			Units []string `json:"units"`
+		} `json:"logs,omitempty"`
 	}
 	decoder := json.NewDecoder(io.LimitReader(file, 64*1024+1))
 	decoder.DisallowUnknownFields()
@@ -114,7 +141,10 @@ func LoadPolicy(path string) (*Policy, error) {
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return nil, errors.New("invalid trailing service policy data")
 	}
-	return NewPolicy(config.Token, config.Units)
+	if config.Logs == nil {
+		return NewPolicy(config.Token, config.Units)
+	}
+	return NewPolicyWithLogs(config.Token, config.Units, config.Logs.Token, config.Logs.Units)
 }
 
 func (p *Policy) Authorized(token string) bool {
@@ -126,6 +156,14 @@ func (p *Policy) Authorized(token string) bool {
 }
 
 func (p *Policy) Units() []string { return slices.Clone(p.units) }
+
+// LogReadPolicy returns the separately scoped immutable log-read policy.
+func (p *Policy) LogReadPolicy() *Policy {
+	if p == nil {
+		return nil
+	}
+	return p.logRead
+}
 
 func (p *Policy) Allows(unit string) bool {
 	if p == nil {
