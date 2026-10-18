@@ -20,8 +20,8 @@ Inventory is disabled by default. Start Stardust with
 Generate a cryptographically random token (for example, 32 random bytes encoded
 as hexadecimal). Never use the example value. The token must be 32–256 printable
 non-space ASCII characters. The file must be regular (not a symlink), owned by
-root or the daemon user, readable by the daemon, and mode **0400 or 0600**. Keep
-its parent directory protected from untrusted writes. Never put the token in
+the daemon user (or root if the daemon runs as root), readable by the daemon, and
+mode **0400 or 0600**. Keep its parent directory protected from untrusted writes. Never put the token in
 process arguments, URLs, source control, or logs. The installer does not create
 this file or change permissions/groups; administrator setup is explicit.
 
@@ -57,6 +57,7 @@ agent for administrator configuration is not an API service-restart capability.
 ```json
 {
   "api_version": "v1",
+  "timestamp": "2026-01-01T12:00:00Z",
   "services": {
     "enabled": true,
     "supported": true,
@@ -70,8 +71,8 @@ agent for administrator configuration is not an API service-restart capability.
 `enabled` means a service policy and inspector are configured. `supported` means
 Linux with `/run/systemd/system` present; it is false on macOS and non-systemd
 hosts. It is not a guarantee that D-Bus or systemctl is accessible. A supported
-host with a missing binary, unavailable bus, or insufficient permissions returns
-503 on inventory requests. Older agents return 404 for capability discovery;
+host with a missing binary or unavailable bus returns `services_unavailable`; an
+access denial returns `services_permission_denied`. Older agents return 404 for capability discovery;
 clients must keep their existing metrics view and mark inventory unsupported.
 
 ## List and details
@@ -80,7 +81,7 @@ clients must keep their existing metrics view and mark inventory unsupported.
 
 - `limit`: 1–50, default 20.
 - `filter`: optional, case-sensitive unit-name substring, at most 255 bytes.
-- `cursor`: optional last examined allowlisted name, exclusive. Treat this value
+- `cursor`: optional last returned allowlisted name, exclusive. Treat this value
   as opaque, echoing the returned `next_cursor` and retaining the same filter.
 - Duplicate/unknown/malformed query parameters return 400. The cursor must exist
   in the current configured allowlist. It is not a snapshot or authentication token.
@@ -92,6 +93,7 @@ clients must keep their existing metrics view and mark inventory unsupported.
 ```json
 {
   "api_version": "v1",
+  "timestamp": "2026-01-01T12:00:00Z",
   "data": {
     "units": [{
       "name": "worker@blue.service",
@@ -101,7 +103,11 @@ clients must keep their existing metrics view and mark inventory unsupported.
       "active_state": "active",
       "sub_state": "running",
       "unit_file_state": "enabled",
-      "main_pid": 123
+      "main_pid": 123,
+      "main_process": {
+        "name": "worker",
+        "effective_uid": 1001
+      }
     }]
   }
 }
@@ -114,10 +120,13 @@ an alias authorizes metadata for its current target; administrators must control
 unit/alias definitions. No alias expansion grants additional API-visible names.
 
 `main_pid: 0` means there is no main process; it is a live PID, not a stable process
-handle. No process command lines, environment, executable paths, or credentials
-are returned. `unit_file_state` is systemd's value (including static/disabled/etc.),
-or empty when unavailable. A missing configured unit remains visible in lists
-with `load_state: "not-found"`, `active_state: "inactive"`, `sub_state: "dead"`,
+handle. When `/proc` exposes the current process, `main_process` includes its
+kernel process name and effective numeric UID; it may be omitted if the process
+exits or changes during collection. No process command lines, environment,
+executable paths, or credentials are returned. `unit_file_state` is systemd's
+value (including static/disabled/etc.), or empty when unavailable. A missing
+configured unit remains visible in lists with `load_state: "not-found"`,
+`active_state: "inactive"`, `sub_state: "dead"`,
 zero PID, and empty optional metadata. Direct detail lookup returns 404 instead.
 Other backend errors fail the page, never masquerading as an empty inventory.
 
@@ -132,7 +141,8 @@ return 405 and `Allow: GET`. Errors use the existing v1 error envelope:
 | 404 | `unit_not_found` | Allowed unit does not exist |
 | 501 | `services_unsupported` | Host does not support systemd inventory |
 | 503 | `services_disabled` | Policy not configured |
-| 503 | `services_unavailable` | Backend missing/unavailable or permission denied |
+| 503 | `services_permission_denied` | systemd access denied |
+| 503 | `services_unavailable` | Backend missing or unavailable |
 | 504 | `services_timeout` | Request deadline/cancellation |
 
 ## Execution and validation limits
@@ -144,7 +154,8 @@ Output is capped at 64 KiB per unit; the whole page shares the HTTP request
 deadline, and process pipe cleanup is bounded. No sudo, PolicyKit changes,
 supplementary groups, or service mutations are introduced. Service descriptions
 remain untrusted data; Orbit must neutralize terminal control sequences before
-rendering them.
+rendering them. Kernel process names are sanitized for control characters but
+should still be rendered as text.
 
 Automated tests use fake systemd output and API fixtures; they do not inspect or
 modify real services. A separately authorized disposable Linux host may be used

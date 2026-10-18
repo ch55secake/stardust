@@ -17,24 +17,31 @@ import (
 )
 
 var (
-	ErrUnsupported = errors.New("systemd service inventory is unsupported on this host")
-	ErrUnavailable = errors.New("systemd is unavailable or access was denied")
-	ErrNotFound    = errors.New("service unit not found")
-	ErrForbidden   = errors.New("service unit is not allowed")
-	unitPattern    = regexp.MustCompile(`^[A-Za-z0-9_:@.\\-]+\.service$`)
+	ErrUnsupported      = errors.New("systemd service inventory is unsupported on this host")
+	ErrUnavailable      = errors.New("systemd is unavailable")
+	ErrPermissionDenied = errors.New("systemd access was denied")
+	ErrNotFound         = errors.New("service unit not found")
+	ErrForbidden        = errors.New("service unit is not allowed")
+	unitPattern         = regexp.MustCompile(`^[A-Za-z0-9_:@.\\-]+\.service$`)
 )
 
 const MaxUnits = 128
 
 type Unit struct {
-	Name          string `json:"name"`
-	ID            string `json:"id"`
-	Description   string `json:"description"`
-	LoadState     string `json:"load_state"`
-	ActiveState   string `json:"active_state"`
-	SubState      string `json:"sub_state"`
-	UnitFileState string `json:"unit_file_state"`
-	MainPID       uint32 `json:"main_pid"`
+	Name          string           `json:"name"`
+	ID            string           `json:"id"`
+	Description   string           `json:"description"`
+	LoadState     string           `json:"load_state"`
+	ActiveState   string           `json:"active_state"`
+	SubState      string           `json:"sub_state"`
+	UnitFileState string           `json:"unit_file_state"`
+	MainPID       uint32           `json:"main_pid"`
+	MainProcess   *ProcessIdentity `json:"main_process,omitempty"`
+}
+
+type ProcessIdentity struct {
+	Name         string `json:"name"`
+	EffectiveUID uint32 `json:"effective_uid"`
 }
 
 // Inspector must not execute mutations or expose command lines/environment.

@@ -63,11 +63,12 @@ The default listener is `127.0.0.1:8787`. Useful options:
 Listener ports must be decimal TCP ports from `1` through `65535`; port `0` is
 rejected because Stardust does not report an OS-assigned ephemeral port.
 
-Stardust has no API authentication or TLS, so it only accepts numeric loopback
-listeners (`127.0.0.1` or `[::1]`). Wildcard addresses, hostnames (including
-`localhost`), and non-loopback IP addresses are rejected at startup with an
-actionable configuration error. Remote access is supported through SSH port
-forwarding; direct non-loopback deployment is not supported.
+The health and metrics API has no authentication or TLS. The optional service
+inventory uses a separate bearer token when enabled. Stardust only accepts
+numeric loopback listeners (`127.0.0.1` or `[::1]`); wildcard addresses,
+hostnames (including `localhost`), and non-loopback IP addresses are rejected at
+startup. Remote access is supported through SSH port forwarding; direct
+non-loopback deployment is not supported.
 
 ## API contract
 

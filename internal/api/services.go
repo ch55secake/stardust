@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ch55secake/stardust/internal/services"
 )
@@ -44,15 +45,17 @@ func (h *Handler) serviceRoute(w http.ResponseWriter, r *http.Request) bool {
 	if capabilities {
 		h.writeJSON(w, http.StatusOK, struct {
 			APIVersion string              `json:"api_version"`
+			Timestamp  time.Time           `json:"timestamp"`
 			Services   ServiceCapabilities `json:"services"`
-		}{Version, ServiceCapabilities{Enabled: h.servicePolicy != nil && h.serviceInspector != nil, Supported: h.serviceInspector != nil && h.serviceInspector.Supported(), Authentication: "bearer"}})
+		}{APIVersion: Version, Timestamp: time.Now().UTC(), Services: ServiceCapabilities{Enabled: h.servicePolicy != nil && h.serviceInspector != nil, Supported: h.serviceInspector != nil && h.serviceInspector.Supported(), Authentication: "bearer"}})
 		return true
 	}
 	if h.servicePolicy == nil || h.serviceInspector == nil {
 		h.writeError(w, http.StatusServiceUnavailable, "services_disabled", "service inventory is disabled; configure a private service policy file")
 		return true
 	}
-	if len(r.Header.Values("Authorization")) != 1 || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || !h.servicePolicy.Authorized(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")) {
+	token, authenticated := serviceBearerToken(r)
+	if !authenticated || !h.servicePolicy.Authorized(token) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="services"`)
 		h.writeError(w, http.StatusUnauthorized, "unauthorized", "a valid service read token is required")
 		return true
@@ -74,14 +77,18 @@ func (h *Handler) serviceRoute(w http.ResponseWriter, r *http.Request) bool {
 			return true
 		}
 		unit, err := h.serviceInspector.Inspect(ctx, name)
+		if err == nil {
+			err = ctx.Err()
+		}
 		if err != nil {
 			h.serviceError(w, err)
 			return true
 		}
 		h.writeJSON(w, http.StatusOK, struct {
 			APIVersion string        `json:"api_version"`
+			Timestamp  time.Time     `json:"timestamp"`
 			Data       services.Unit `json:"data"`
-		}{Version, unit})
+		}{APIVersion: Version, Timestamp: time.Now().UTC(), Data: unit})
 		return true
 	}
 	query, err := parseServiceQuery(r)
@@ -91,7 +98,7 @@ func (h *Handler) serviceRoute(w http.ResponseWriter, r *http.Request) bool {
 	}
 	names := h.servicePolicy.Units()
 	page := ServicePage{Units: []services.Unit{}}
-	// Cursor is the last examined configured name, not a snapshot token. Unit
+	// Cursor is the last returned configured name, not a snapshot token. Unit
 	// state is live; policy is fixed until restart. Filtering matches names only.
 	if query.cursor != "" && !h.servicePolicy.Allows(query.cursor) {
 		h.writeError(w, http.StatusBadRequest, "invalid_query", "cursor is not in the configured allowlist")
@@ -102,6 +109,9 @@ func (h *Handler) serviceRoute(w http.ResponseWriter, r *http.Request) bool {
 			continue
 		}
 		unit, inspectErr := h.serviceInspector.Inspect(ctx, name)
+		if inspectErr == nil {
+			inspectErr = ctx.Err()
+		}
 		if errors.Is(inspectErr, services.ErrNotFound) {
 			unit = services.Unit{Name: name, ID: name, LoadState: "not-found", ActiveState: "inactive", SubState: "dead"}
 		} else if inspectErr != nil {
@@ -121,9 +131,22 @@ func (h *Handler) serviceRoute(w http.ResponseWriter, r *http.Request) bool {
 	}
 	h.writeJSON(w, http.StatusOK, struct {
 		APIVersion string      `json:"api_version"`
+		Timestamp  time.Time   `json:"timestamp"`
 		Data       ServicePage `json:"data"`
-	}{Version, page})
+	}{APIVersion: Version, Timestamp: time.Now().UTC(), Data: page})
 	return true
+}
+
+func serviceBearerToken(r *http.Request) (string, bool) {
+	values := r.Header.Values("Authorization")
+	if len(values) != 1 {
+		return "", false
+	}
+	scheme, token, found := strings.Cut(values[0], " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") || token == "" || strings.ContainsAny(token, " \t\r\n") {
+		return "", false
+	}
+	return token, true
 }
 
 type serviceQuery struct {
@@ -169,6 +192,8 @@ func (h *Handler) serviceError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, services.ErrForbidden):
 		h.writeError(w, http.StatusForbidden, "unit_forbidden", "unit is not in the configured allowlist")
+	case errors.Is(err, services.ErrPermissionDenied):
+		h.writeError(w, http.StatusServiceUnavailable, "services_permission_denied", "permission to inspect systemd units was denied")
 	case errors.Is(err, services.ErrNotFound):
 		h.writeError(w, http.StatusNotFound, "unit_not_found", "service unit not found")
 	case errors.Is(err, services.ErrUnsupported):
