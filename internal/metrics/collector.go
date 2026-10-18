@@ -3,7 +3,10 @@ package metrics
 import (
 	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -20,15 +23,16 @@ import (
 // network counters are cumulative totals aggregated over all interfaces, with
 // the same counters also available per interface.
 type Snapshot struct {
-	Hostname string        `json:"hostname"`
-	OS       OSInfo        `json:"os"`
-	CPU      CPU           `json:"cpu"`
-	Memory   Memory        `json:"memory"`
-	Swap     Swap          `json:"swap"`
-	Disk     Disk          `json:"disk"`
-	Uptime   uint64        `json:"uptime_seconds"`
-	Network  Network       `json:"network"`
-	Errors   []MetricError `json:"errors,omitempty"`
+	Hostname    string        `json:"hostname"`
+	OS          OSInfo        `json:"os"`
+	CPU         CPU           `json:"cpu"`
+	Memory      Memory        `json:"memory"`
+	Swap        Swap          `json:"swap"`
+	Disk        Disk          `json:"disk"`
+	Filesystems []Filesystem  `json:"filesystems"`
+	Uptime      uint64        `json:"uptime_seconds"`
+	Network     Network       `json:"network"`
+	Errors      []MetricError `json:"errors,omitempty"`
 }
 
 type MetricError struct {
@@ -76,6 +80,16 @@ type Disk struct {
 	UsedPercent float64 `json:"used_percent"`
 }
 
+type Filesystem struct {
+	Mountpoint     string  `json:"mount_point"`
+	Device         string  `json:"device"`
+	FilesystemType string  `json:"filesystem_type"`
+	UsedBytes      uint64  `json:"used_bytes"`
+	TotalBytes     uint64  `json:"total_bytes"`
+	AvailableBytes uint64  `json:"available_bytes"`
+	UsedPercent    float64 `json:"used_percent"`
+}
+
 type Network struct {
 	BytesReceived   uint64             `json:"bytes_received"`
 	BytesSent       uint64             `json:"bytes_sent"`
@@ -107,8 +121,11 @@ type collectorFunctions struct {
 	virtualMemory     func(context.Context) (*mem.VirtualMemoryStat, error)
 	swapMemory        func(context.Context) (*mem.SwapMemoryStat, error)
 	diskUsage         func(context.Context, string) (*disk.UsageStat, error)
+	diskPartitions    func(context.Context) ([]disk.PartitionStat, error)
 	networkCounters   func(context.Context) ([]psnet.IOCountersStat, error)
 }
+
+const maxFilesystemMounts = 64
 
 func NewCollector(timeout time.Duration, diskPath string) *Collector {
 	if timeout <= 0 {
@@ -129,6 +146,7 @@ func NewCollector(timeout time.Duration, diskPath string) *Collector {
 			virtualMemory:     mem.VirtualMemoryWithContext,
 			swapMemory:        mem.SwapMemoryWithContext,
 			diskUsage:         disk.UsageWithContext,
+			diskPartitions:    func(ctx context.Context) ([]disk.PartitionStat, error) { return disk.PartitionsWithContext(ctx, true) },
 			networkCounters: func(ctx context.Context) ([]psnet.IOCountersStat, error) {
 				return psnet.IOCountersWithContext(ctx, true)
 			},
@@ -256,6 +274,43 @@ func (c *Collector) Collect(ctx context.Context) (Snapshot, error) {
 		return snapshot, err
 	}
 
+	snapshot.Filesystems = []Filesystem{}
+	partitions, err := c.functions.diskPartitions(ctx)
+	if err != nil {
+		addError("filesystems", err)
+	} else {
+		partitions, truncated := filterFilesystemPartitions(partitions)
+		if truncated {
+			addError("filesystems", fmt.Errorf("mount list limited to %d entries", maxFilesystemMounts))
+		}
+		for _, partition := range partitions {
+			if err := ctx.Err(); err != nil {
+				return snapshot, err
+			}
+			usage, err := c.functions.diskUsage(ctx, partition.Mountpoint)
+			if err != nil {
+				addError("filesystems", fmt.Errorf("mount %q: %w", partition.Mountpoint, err))
+				continue
+			}
+			if usage == nil {
+				addError("filesystems", fmt.Errorf("mount %q: usage unavailable", partition.Mountpoint))
+				continue
+			}
+			snapshot.Filesystems = append(snapshot.Filesystems, Filesystem{
+				Mountpoint:     partition.Mountpoint,
+				Device:         partition.Device,
+				FilesystemType: partition.Fstype,
+				UsedBytes:      usage.Used,
+				TotalBytes:     usage.Total,
+				AvailableBytes: usage.Free,
+				UsedPercent:    usage.UsedPercent,
+			})
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return snapshot, err
+	}
+
 	snapshot.Network.Interfaces = []NetworkInterface{}
 	interfaces, err := c.functions.networkCounters(ctx)
 	if err != nil {
@@ -284,4 +339,56 @@ func (c *Collector) Collect(ctx context.Context) (Snapshot, error) {
 
 	snapshot.Errors = errs
 	return snapshot, nil
+}
+
+func filterFilesystemPartitions(partitions []disk.PartitionStat) ([]disk.PartitionStat, bool) {
+	filtered := make([]disk.PartitionStat, 0, len(partitions))
+	for _, partition := range partitions {
+		mountpoint := strings.TrimSpace(partition.Mountpoint)
+		if mountpoint == "" || isPseudoFilesystem(partition.Fstype) {
+			continue
+		}
+		partition.Mountpoint = filepath.Clean(mountpoint)
+		filtered = append(filtered, partition)
+	}
+
+	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].Mountpoint != filtered[j].Mountpoint {
+			return filtered[i].Mountpoint < filtered[j].Mountpoint
+		}
+		if filtered[i].Device != filtered[j].Device {
+			if filtered[i].Device == "" {
+				return false
+			}
+			if filtered[j].Device == "" {
+				return true
+			}
+			return filtered[i].Device < filtered[j].Device
+		}
+		return filtered[i].Fstype < filtered[j].Fstype
+	})
+
+	unique := filtered[:0]
+	seenMountpoints := make(map[string]struct{}, len(filtered))
+	for _, partition := range filtered {
+		if _, exists := seenMountpoints[partition.Mountpoint]; exists {
+			continue
+		}
+		seenMountpoints[partition.Mountpoint] = struct{}{}
+		unique = append(unique, partition)
+	}
+	truncated := len(unique) > maxFilesystemMounts
+	if truncated {
+		unique = unique[:maxFilesystemMounts]
+	}
+	return unique, truncated
+}
+
+func isPseudoFilesystem(filesystemType string) bool {
+	switch strings.ToLower(strings.TrimSpace(filesystemType)) {
+	case "autofs", "binfmt_misc", "bpf", "cgroup", "cgroup2", "configfs", "debugfs", "devfs", "devpts", "devtmpfs", "efivarfs", "fdesc", "fuse.lxcfs", "fusectl", "hugetlbfs", "kernfs", "mqueue", "nsfs", "nullfs", "proc", "procfs", "pstore", "rootfs", "rpc_pipefs", "securityfs", "selinuxfs", "smackfs", "synthfs", "sysfs", "tracefs", "usbfs", "volfs":
+		return true
+	default:
+		return false
+	}
 }

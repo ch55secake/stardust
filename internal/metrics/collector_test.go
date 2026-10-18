@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -43,6 +44,9 @@ func fixtureCollector(timeout time.Duration, diskPath string) *Collector {
 		},
 		diskUsage: func(_ context.Context, path string) (*disk.UsageStat, error) {
 			return &disk.UsageStat{Path: path, Used: 100, Total: 1000, UsedPercent: 10}, nil
+		},
+		diskPartitions: func(context.Context) ([]disk.PartitionStat, error) {
+			return []disk.PartitionStat{}, nil
 		},
 		networkCounters: func(context.Context) ([]psnet.IOCountersStat, error) {
 			return []psnet.IOCountersStat{
@@ -193,6 +197,145 @@ func TestCollectorReportsNetworkFailureAsPartialMetric(t *testing.T) {
 	}
 	if len(snapshot.Errors) != 1 || snapshot.Errors[0] != (MetricError{Metric: "network", Message: "network counters unavailable"}) {
 		t.Fatalf("errors = %+v, want one network metric error", snapshot.Errors)
+	}
+}
+
+func TestCollectorReportsFilesystemsAndKeepsConfiguredDiskMetric(t *testing.T) {
+	collector := fixtureCollector(time.Second, "/fixture")
+	collector.functions.diskPartitions = func(context.Context) ([]disk.PartitionStat, error) {
+		return []disk.PartitionStat{
+			{Device: "/dev/z-data", Mountpoint: "/data/", Fstype: "ext4"},
+			{Device: "/dev/root", Mountpoint: "/", Fstype: "apfs"},
+			{Device: "/dev/a-data", Mountpoint: "/data", Fstype: "xfs"},
+			{Device: "proc", Mountpoint: "/proc", Fstype: "proc"},
+			{Device: "sysfs", Mountpoint: "/sys", Fstype: "sysfs"},
+			{Device: "/dev/disk2", Mountpoint: "/run", Fstype: "tmpfs"},
+			{Device: "/dev/empty", Mountpoint: "", Fstype: "ext4"},
+		}, nil
+	}
+	var usagePaths []string
+	collector.functions.diskUsage = func(_ context.Context, path string) (*disk.UsageStat, error) {
+		usagePaths = append(usagePaths, path)
+		switch path {
+		case "/fixture":
+			return &disk.UsageStat{Path: path, Used: 100, Total: 1000, UsedPercent: 10}, nil
+		case "/":
+			return &disk.UsageStat{Path: path, Used: 700, Total: 1000, Free: 300, UsedPercent: 70}, nil
+		case "/data":
+			return &disk.UsageStat{Path: path, Used: 400, Total: 2000, Free: 1600, UsedPercent: 20}, nil
+		case "/run":
+			return &disk.UsageStat{Path: path, Used: 50, Total: 100, Free: 50, UsedPercent: 50}, nil
+		default:
+			return nil, errors.New("unexpected mount point")
+		}
+	}
+
+	snapshot, err := collector.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if snapshot.Disk != (Disk{Path: "/fixture", UsedBytes: 100, TotalBytes: 1000, UsedPercent: 10}) {
+		t.Fatalf("disk = %+v, want unchanged configured-path metric", snapshot.Disk)
+	}
+	wantFilesystems := []Filesystem{
+		{Mountpoint: "/", Device: "/dev/root", FilesystemType: "apfs", UsedBytes: 700, TotalBytes: 1000, AvailableBytes: 300, UsedPercent: 70},
+		{Mountpoint: "/data", Device: "/dev/a-data", FilesystemType: "xfs", UsedBytes: 400, TotalBytes: 2000, AvailableBytes: 1600, UsedPercent: 20},
+		{Mountpoint: "/run", Device: "/dev/disk2", FilesystemType: "tmpfs", UsedBytes: 50, TotalBytes: 100, AvailableBytes: 50, UsedPercent: 50},
+	}
+	if !reflect.DeepEqual(snapshot.Filesystems, wantFilesystems) {
+		t.Fatalf("filesystems = %+v, want %+v", snapshot.Filesystems, wantFilesystems)
+	}
+	if !reflect.DeepEqual(usagePaths, []string{"/fixture", "/", "/data", "/run"}) {
+		t.Fatalf("usage paths = %v, want configured path and unique non-pseudo mounts", usagePaths)
+	}
+	if len(snapshot.Errors) != 0 {
+		t.Fatalf("errors = %+v, want none", snapshot.Errors)
+	}
+}
+
+func TestCollectorKeepsAccessibleFilesystemsWhenMountUsageFails(t *testing.T) {
+	collector := fixtureCollector(time.Second, "/fixture")
+	collector.functions.diskPartitions = func(context.Context) ([]disk.PartitionStat, error) {
+		return []disk.PartitionStat{
+			{Device: "/dev/root", Mountpoint: "/", Fstype: "ext4"},
+			{Device: "//server/share", Mountpoint: "/private", Fstype: "smbfs"},
+		}, nil
+	}
+	collector.functions.diskUsage = func(_ context.Context, path string) (*disk.UsageStat, error) {
+		if path == "/private" {
+			return nil, errors.New("permission denied")
+		}
+		return &disk.UsageStat{Path: path, Used: 100, Total: 500, Free: 400, UsedPercent: 20}, nil
+	}
+
+	snapshot, err := collector.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if len(snapshot.Filesystems) != 1 || snapshot.Filesystems[0].Mountpoint != "/" {
+		t.Fatalf("filesystems = %+v, want the accessible root mount", snapshot.Filesystems)
+	}
+	if snapshot.Disk.Path != "/fixture" {
+		t.Fatalf("disk path = %q, want configured path despite another mount failure", snapshot.Disk.Path)
+	}
+	wantError := MetricError{Metric: "filesystems", Message: `mount "/private": permission denied`}
+	if !reflect.DeepEqual(snapshot.Errors, []MetricError{wantError}) {
+		t.Fatalf("errors = %+v, want %+v", snapshot.Errors, wantError)
+	}
+}
+
+func TestCollectorReportsFilesystemEnumerationFailureAsPartialMetric(t *testing.T) {
+	collector := fixtureCollector(time.Second, "/fixture")
+	collector.functions.diskPartitions = func(context.Context) ([]disk.PartitionStat, error) {
+		return nil, errors.New("mount table unavailable")
+	}
+
+	snapshot, err := collector.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if snapshot.Filesystems == nil || len(snapshot.Filesystems) != 0 {
+		t.Fatalf("filesystems = %+v, want an empty array", snapshot.Filesystems)
+	}
+	if snapshot.Disk.Path != "/fixture" || snapshot.Memory.TotalBytes != 2000 {
+		t.Fatalf("unrelated metrics missing after filesystem enumeration failure: %+v", snapshot)
+	}
+	wantErrors := []MetricError{{Metric: "filesystems", Message: "mount table unavailable"}}
+	if !reflect.DeepEqual(snapshot.Errors, wantErrors) {
+		t.Fatalf("errors = %+v, want %+v", snapshot.Errors, wantErrors)
+	}
+}
+
+func TestFilterFilesystemPartitionsDeduplicatesAndCaps(t *testing.T) {
+	partitions := []disk.PartitionStat{
+		{Device: "/dev/z", Mountpoint: "/data/", Fstype: "ext4"},
+		{Device: "/dev/b", Mountpoint: "/data", Fstype: "ext4"},
+		{Device: "/dev/a", Mountpoint: "/data", Fstype: "xfs"},
+		{Device: "proc", Mountpoint: "/proc", Fstype: "proc"},
+		{Device: "devfs", Mountpoint: "/dev", Fstype: "devfs"},
+		{Device: "hugetlbfs", Mountpoint: "/huge", Fstype: "hugetlbfs"},
+		{Device: "disk", Mountpoint: "/alias", Fstype: "nullfs"},
+		{Device: "/dev/empty", Mountpoint: "  ", Fstype: "ext4"},
+	}
+	filtered, truncated := filterFilesystemPartitions(partitions)
+	if truncated {
+		t.Fatal("unexpected truncation")
+	}
+	want := []disk.PartitionStat{{Device: "/dev/a", Mountpoint: "/data", Fstype: "xfs"}}
+	if !reflect.DeepEqual(filtered, want) {
+		t.Fatalf("filtered partitions = %+v, want %+v", filtered, want)
+	}
+
+	partitions = make([]disk.PartitionStat, maxFilesystemMounts+1)
+	for i := range partitions {
+		partitions[i] = disk.PartitionStat{Device: "/dev/test", Mountpoint: fmt.Sprintf("/volume-%03d", i), Fstype: "ext4"}
+	}
+	filtered, truncated = filterFilesystemPartitions(partitions)
+	if !truncated || len(filtered) != maxFilesystemMounts {
+		t.Fatalf("filtered count = %d, truncated = %t, want cap %d and truncation", len(filtered), truncated, maxFilesystemMounts)
+	}
+	if filtered[0].Mountpoint != "/volume-000" || filtered[len(filtered)-1].Mountpoint != "/volume-063" {
+		t.Fatalf("capped mounts range from %q to %q, want first 64 sorted mounts", filtered[0].Mountpoint, filtered[len(filtered)-1].Mountpoint)
 	}
 }
 

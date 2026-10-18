@@ -122,6 +122,15 @@ Metric semantics:
   in `data.errors` without failing the rest of the snapshot.
 - `disk` reports usage for the filesystem containing the configured
   `--disk-path`; sizes are bytes and the percentage is 0-100.
+- `filesystems` reports up to 64 mounted filesystems, sorted by mount point.
+  Entries include the mount point, device and filesystem type where available,
+  used/total bytes, unprivileged available bytes, and used percentage. Known
+  kernel/pseudo filesystems (such as procfs, sysfs, and devfs) and empty mount
+  points are skipped; memory-backed filesystems such as tmpfs are included.
+  Normalized duplicate mount points collapse to one entry, choosing the
+  non-empty device with the lexicographically first identity. Excess mounts are
+  omitted with a `filesystems` error. A mount that cannot be read is omitted and
+  reported in `data.errors` without discarding other filesystem or system data.
 - `network` reports cumulative bytes and packets sent/received, summed across
   all interfaces reported by the OS, including loopback and virtual interfaces.
   Its `interfaces` array reports the same counters by interface name. These
@@ -158,6 +167,17 @@ returns HTTP 503.
     "memory": {"used_bytes": 1000, "total_bytes": 2000, "used_percent": 50},
     "swap": {"total_bytes": 1000, "used_bytes": 300, "free_bytes": 700, "used_percent": 30},
     "disk": {"path": "/", "used_bytes": 1000, "total_bytes": 2000, "used_percent": 50},
+    "filesystems": [
+      {
+        "mount_point": "/",
+        "device": "/dev/root",
+        "filesystem_type": "ext4",
+        "used_bytes": 1000,
+        "total_bytes": 2000,
+        "available_bytes": 900,
+        "used_percent": 50
+      }
+    ],
     "uptime_seconds": 86400,
     "network": {
       "bytes_received": 1000,
