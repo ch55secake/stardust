@@ -77,8 +77,8 @@ example, 32 random bytes encoded as hexadecimal) in a regular file owned by the
 runtime account with mode `0400` or `0600`, then start Stardust with
 `--api-token-file /path/to/private-token`. The file must not be a symlink and
 must be under root- or runtime-owned directories not writable by group or other
-users. It must contain at least 32 printable non-space ASCII characters (a
-trailing newline is allowed).
+users (root-owned sticky directories such as `/tmp` are allowed). It must contain
+at least 32 printable non-space ASCII characters (a trailing newline is allowed).
 Stardust reads it once at startup and requires `Authorization: Bearer <token>` on
 **both** health and metrics endpoints. Do not pass the token as a command-line
 option or write it to logs; only the file path is passed as configuration. Store
