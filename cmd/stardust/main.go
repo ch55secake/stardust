@@ -18,7 +18,7 @@ var version = "dev"
 func main() {
 	cfg := config.Default()
 	showVersion := flag.Bool("version", false, "print the Stardust version")
-	servicePolicyFile := flag.String("service-policy-file", "", "private JSON file containing service read token and exact unit allowlist (disabled by default)")
+	servicePolicyFile := flag.String("service-policy-file", "", "private JSON file containing service credentials and exact read/restart allowlists (restart disabled by default)")
 	flag.StringVar(&cfg.ListenAddress, "listen", cfg.ListenAddress, "TCP listen address")
 	flag.StringVar(&cfg.APITokenFile, "api-token-file", "", "private file containing the optional health/metrics bearer token")
 	flag.DurationVar(&cfg.CollectionTimeout, "collection-timeout", cfg.CollectionTimeout, "maximum time allowed for metric collection")

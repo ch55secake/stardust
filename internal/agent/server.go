@@ -15,8 +15,9 @@ import (
 )
 
 type Server struct {
-	httpServer *http.Server
-	logger     *slog.Logger
+	httpServer     *http.Server
+	logger         *slog.Logger
+	restartManager *services.RestartManager
 }
 
 func NewServer(cfg config.Config, logger *slog.Logger) *Server {
@@ -28,21 +29,35 @@ func NewServerWithAPIToken(cfg config.Config, logger *slog.Logger, apiToken stri
 		logger = slog.Default()
 	}
 	collector := metrics.NewCollector(cfg.CollectionTimeout, cfg.DiskPath)
+	systemd := services.NewSystemd()
+	var restartManager *services.RestartManager
+	if cfg.ServicePolicy != nil && cfg.ServicePolicy.RestartEnabled() && systemd.Supported() {
+		manager, err := services.NewRestartManager(services.DefaultRestartStorePath, cfg.ServicePolicy, systemd, systemd, logger)
+		if err != nil {
+			logger.Error("service restart is disabled because its operation store is unavailable", "error", err)
+		} else {
+			restartManager = manager
+		}
+	}
 	return &Server{
 		httpServer: &http.Server{
 			Addr:              cfg.ListenAddress,
-			Handler:           api.NewHandlerWithToken(collector, cfg.RequestTimeout, logger, apiToken, api.WithServices(cfg.ServicePolicy, services.NewSystemd()), api.WithServiceLogs(cfg.ServicePolicy.LogReadPolicy(), services.NewJournal())),
+			Handler:           api.NewHandlerWithToken(collector, cfg.RequestTimeout, logger, apiToken, api.WithServices(cfg.ServicePolicy, systemd, restartManager), api.WithServiceLogs(cfg.ServicePolicy.LogReadPolicy(), services.NewJournal())),
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       cfg.RequestTimeout,
 			WriteTimeout:      cfg.RequestTimeout,
 			IdleTimeout:       60 * time.Second,
 			MaxHeaderBytes:    16 * 1024,
 		},
-		logger: logger,
+		logger:         logger,
+		restartManager: restartManager,
 	}
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	if s.restartManager != nil {
+		defer s.restartManager.Close()
+	}
 	listener, err := net.Listen("tcp", s.httpServer.Addr)
 	if err != nil {
 		return err

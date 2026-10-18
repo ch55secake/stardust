@@ -11,6 +11,8 @@ Restart=on-failure
 RestartSec=5s
 RuntimeDirectory=stardust
 RuntimeDirectoryMode=0750
+StateDirectory=stardust
+StateDirectoryMode=0700
 
 NoNewPrivileges=true
 PrivateTmp=true
@@ -26,7 +28,7 @@ LockPersonality=true
 MemoryDenyWriteExecute=true
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadWritePaths=/run/stardust
+ReadWritePaths=/run/stardust /var/lib/stardust
 
 [Install]
 WantedBy=multi-user.target

@@ -62,6 +62,8 @@ curl --fail --silent --max-time 10 http://127.0.0.1:8787/api/v1/metrics | grep -
 
 [[ "$(stat -c '%U:%G' /run/stardust)" == "stardust:stardust" ]] || fail "runtime directory is not owned by stardust"
 [[ "$(stat -c '%a' /run/stardust)" == 750 ]] || fail "runtime directory mode is not 0750"
+[[ "$(stat -c '%U:%G' /var/lib/stardust)" == "stardust:stardust" ]] || fail "state directory is not owned by stardust"
+[[ "$(stat -c '%a' /var/lib/stardust)" == 700 ]] || fail "state directory mode is not 0700"
 
 main_pid="$(systemctl show --property=MainPID --value stardust.service)"
 [[ "$main_pid" =~ ^[1-9][0-9]*$ ]] || fail "systemd reported invalid main PID: ${main_pid}"

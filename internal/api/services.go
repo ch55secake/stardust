@@ -12,16 +12,22 @@ import (
 	"github.com/ch55secake/stardust/internal/services"
 )
 
-func WithServices(policy *services.Policy, inspector services.Inspector) func(*Handler) {
-	return func(h *Handler) { h.servicePolicy, h.serviceInspector = policy, inspector }
+func WithServices(policy *services.Policy, inspector services.Inspector, restarts ...*services.RestartManager) func(*Handler) {
+	return func(h *Handler) {
+		h.servicePolicy, h.serviceInspector = policy, inspector
+		if len(restarts) > 0 {
+			h.restartManager = restarts[0]
+		}
+	}
 }
 
 type ServiceCapabilities struct {
-	Enabled        bool   `json:"enabled"`
-	Supported      bool   `json:"supported"`
-	Authentication string `json:"authentication"`
-	Logs           bool   `json:"logs"`
-	Restart        bool   `json:"restart"`
+	Enabled               bool   `json:"enabled"`
+	Supported             bool   `json:"supported"`
+	Authentication        string `json:"authentication"`
+	Logs                  bool   `json:"logs"`
+	Restart               bool   `json:"restart"`
+	RestartAuthentication string `json:"restart_authentication,omitempty"`
 }
 
 type ServicePage struct {
@@ -41,21 +47,37 @@ func (h *Handler) serviceRoute(w http.ResponseWriter, r *http.Request) bool {
 	list := r.URL.Path == "/api/v1/services"
 	logs := strings.HasPrefix(r.URL.Path, "/api/v1/services/") && strings.HasSuffix(r.URL.Path, "/logs")
 	detail := strings.HasPrefix(r.URL.Path, "/api/v1/services/") && !logs
-	if !capabilities && !list && !detail && !logs {
+	restart := detail && strings.HasSuffix(r.URL.Path, "/restart")
+	operationStatus := strings.HasPrefix(r.URL.Path, "/api/v1/service-operations/")
+	if !capabilities && !list && !detail && !logs && !operationStatus {
 		return false
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	if restart {
+		name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/services/"), "/restart")
+		h.serviceRestartRoute(w, r, name)
+		return true
+	}
+	if operationStatus {
+		h.restartStatusRoute(w, r, strings.TrimPrefix(r.URL.Path, "/api/v1/service-operations/"))
+		return true
+	}
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		h.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only GET is supported")
 		return true
 	}
 	if capabilities {
+		restartEnabled := h.servicePolicy != nil && h.servicePolicy.RestartEnabled() && h.restartManager != nil
+		restartAuthentication := ""
+		if restartEnabled {
+			restartAuthentication = "bearer"
+		}
 		h.writeJSON(w, http.StatusOK, struct {
 			APIVersion string              `json:"api_version"`
 			Timestamp  time.Time           `json:"timestamp"`
 			Services   ServiceCapabilities `json:"services"`
-		}{APIVersion: Version, Timestamp: time.Now().UTC(), Services: ServiceCapabilities{Enabled: h.servicePolicy != nil && h.serviceInspector != nil, Supported: h.serviceInspector != nil && h.serviceInspector.Supported(), Authentication: "bearer", Logs: h.servicePolicy != nil && h.serviceInspector != nil && h.serviceInspector.Supported() && h.logPolicy != nil && h.journalReader != nil && h.journalReader.Supported()}})
+		}{APIVersion: Version, Timestamp: time.Now().UTC(), Services: ServiceCapabilities{Enabled: h.servicePolicy != nil && h.serviceInspector != nil, Supported: h.serviceInspector != nil && h.serviceInspector.Supported(), Authentication: "bearer", Logs: h.servicePolicy != nil && h.serviceInspector != nil && h.serviceInspector.Supported() && h.logPolicy != nil && h.journalReader != nil && h.journalReader.Supported(), Restart: restartEnabled, RestartAuthentication: restartAuthentication}})
 		return true
 	}
 	if logs {
@@ -147,6 +169,128 @@ func (h *Handler) serviceRoute(w http.ResponseWriter, r *http.Request) bool {
 		Data       ServicePage `json:"data"`
 	}{APIVersion: Version, Timestamp: time.Now().UTC(), Data: page})
 	return true
+}
+
+func (h *Handler) serviceRestartRoute(w http.ResponseWriter, r *http.Request, name string) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		h.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only POST is supported for service restart")
+		return
+	}
+	if r.URL.RawQuery != "" {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "restart requests do not accept query parameters")
+		return
+	}
+	if len(r.Header.Values("Origin")) != 0 {
+		h.writeError(w, http.StatusForbidden, "origin_forbidden", "browser-originated restart requests are not supported")
+		return
+	}
+	if h.servicePolicy == nil || !h.servicePolicy.RestartEnabled() {
+		h.writeError(w, http.StatusServiceUnavailable, "restart_disabled", "service restart is disabled; configure a private restart policy")
+		return
+	}
+	token, authenticated := serviceBearerToken(r)
+	if !authenticated || !h.servicePolicy.RestartAuthorized(token) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="service-restart"`)
+		h.writeError(w, http.StatusUnauthorized, "unauthorized", "a valid service restart token is required")
+		return
+	}
+	if h.serviceInspector == nil || !h.serviceInspector.Supported() {
+		h.writeError(w, http.StatusNotImplemented, "services_unsupported", "systemd service restart is unsupported on this host")
+		return
+	}
+	if h.restartManager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, "restart_unavailable", "the service restart operation store is unavailable")
+		return
+	}
+	if !services.ValidRestartUnit(name) {
+		h.writeError(w, http.StatusBadRequest, "invalid_unit", "a valid .service unit name is required")
+		return
+	}
+	if !h.servicePolicy.AllowsRestart(name) {
+		h.writeError(w, http.StatusForbidden, "unit_forbidden", "unit is not in the configured restart allowlist")
+		return
+	}
+	if r.ContentLength != 0 || len(r.TransferEncoding) != 0 {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "restart requests must not contain a body")
+		return
+	}
+	keys := r.Header.Values("Idempotency-Key")
+	if len(keys) != 1 || !services.ValidIdempotencyKey(keys[0]) {
+		h.writeError(w, http.StatusBadRequest, "invalid_idempotency_key", "one random Idempotency-Key header is required")
+		return
+	}
+	operation, created, err := h.restartManager.Start(name, keys[0], r.RemoteAddr)
+	if err != nil {
+		h.restartError(w, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusAccepted
+	}
+	h.writeJSON(w, status, struct {
+		APIVersion string                    `json:"api_version"`
+		Timestamp  time.Time                 `json:"timestamp"`
+		Data       services.RestartOperation `json:"data"`
+	}{APIVersion: Version, Timestamp: time.Now().UTC(), Data: operation})
+}
+
+func (h *Handler) restartStatusRoute(w http.ResponseWriter, r *http.Request, operationID string) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		h.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only GET is supported for restart operation status")
+		return
+	}
+	if r.URL.RawQuery != "" {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "restart status requests do not accept query parameters")
+		return
+	}
+	if h.servicePolicy == nil || !h.servicePolicy.RestartEnabled() {
+		h.writeError(w, http.StatusServiceUnavailable, "restart_disabled", "service restart is disabled")
+		return
+	}
+	token, authenticated := serviceBearerToken(r)
+	if !authenticated || !h.servicePolicy.RestartAuthorized(token) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="service-restart"`)
+		h.writeError(w, http.StatusUnauthorized, "unauthorized", "a valid service restart token is required")
+		return
+	}
+	if h.restartManager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, "restart_unavailable", "the service restart operation store is unavailable")
+		return
+	}
+	operation, err := h.restartManager.Status(operationID)
+	if err != nil {
+		h.restartError(w, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, struct {
+		APIVersion string                    `json:"api_version"`
+		Timestamp  time.Time                 `json:"timestamp"`
+		Data       services.RestartOperation `json:"data"`
+	}{APIVersion: Version, Timestamp: time.Now().UTC(), Data: operation})
+}
+
+func (h *Handler) restartError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, services.ErrForbidden):
+		h.writeError(w, http.StatusForbidden, "unit_forbidden", "unit is not in the configured restart allowlist")
+	case errors.Is(err, services.ErrUnsupported):
+		h.writeError(w, http.StatusNotImplemented, "services_unsupported", "systemd service restart is unsupported on this host")
+	case errors.Is(err, services.ErrUnitBusy):
+		h.writeError(w, http.StatusConflict, "unit_busy", "a restart operation for this unit is already in progress")
+	case errors.Is(err, services.ErrIdempotencyConflict):
+		h.writeError(w, http.StatusConflict, "idempotency_conflict", "Idempotency-Key was already used for a different unit")
+	case errors.Is(err, services.ErrOperationNotFound):
+		h.writeError(w, http.StatusNotFound, "operation_not_found", "restart operation not found or expired")
+	case errors.Is(err, services.ErrOperationLimit):
+		h.writeError(w, http.StatusServiceUnavailable, "restart_capacity", "restart operation capacity is full; retry later")
+	case errors.Is(err, services.ErrOperationStore):
+		h.writeError(w, http.StatusServiceUnavailable, "restart_unavailable", "restart operation state could not be persisted")
+	default:
+		h.writeError(w, http.StatusBadRequest, "invalid_idempotency_key", "one random Idempotency-Key header is required")
+	}
 }
 
 func serviceBearerToken(r *http.Request) (string, bool) {

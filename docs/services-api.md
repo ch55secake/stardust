@@ -1,11 +1,12 @@
-# Read-only systemd service inventory and logs (API v1)
+# systemd service inventory, logs, and restart API (API v1)
 
 This is the producer contract for Orbit's service browser and log viewer
 ([Orbit #44](https://github.com/ch55secake/orbit/issues/44),
-[Orbit #45](https://github.com/ch55secake/orbit/issues/45)). It adds read-only
-service metadata and allowlisted journal queries; it does **not** add restarts,
-arbitrary process control, or launchd support. It does not invoke SSH commands;
-the existing SSH forward can still transport API traffic.
+[Orbit #45](https://github.com/ch55secake/orbit/issues/45)), plus explicitly
+authorized systemd restarts. It adds read-only service metadata, allowlisted
+journal queries, and opt-in service restarts; it does **not** add arbitrary
+process control or launchd support. It does not invoke SSH commands; the existing
+SSH forward can still transport API traffic.
 
 ## Explicit opt-in and read authorization
 
@@ -20,37 +21,48 @@ JSON file contains:
   "logs": {
     "token": "A_DIFFERENT_RANDOM_SECRET_FOR_LOG_READS",
     "units": ["nginx.service"]
-  }
+  },
+  "restart_token": "A_THIRD_RANDOM_SECRET_FOR_RESTARTS",
+  "restart_units": ["nginx.service"]
 }
 ```
 
-Generate a different cryptographically random token for inventory and logs (for
-example, 32 random bytes encoded as hexadecimal). Never use the example values.
-Each token must be 32–256 printable non-space ASCII characters. The file must be
-regular (not a symlink), owned by the daemon user (or root if the daemon runs as
-root), readable by the daemon, and mode **0400 or 0600**. Keep its parent
-directory protected from untrusted writes. Never put either token in process
-arguments, URLs, source control, or logs. The installer does not create this file
-or change permissions/groups; administrator setup is explicit.
+Generate a different cryptographically random token for each enabled capability
+(for example, 32 random bytes encoded as hexadecimal). Never use the example
+values. Each token must be 32–256 printable non-space ASCII characters. The
+policy file must be regular (not a symlink), owned by the daemon user (or root
+if the daemon runs as root), readable by the daemon, and mode **0400 or 0600**.
+Keep its parent directory protected from untrusted writes. Never put any token in
+process arguments, URLs, source control, or logs. The installer does not create
+this file or change permissions/groups; administrator setup is explicit.
 
-Each allowlist contains at most 128 exact `.service` names, including template
-instances and aliases. No globs, paths, options, or shell expressions are accepted.
+The inventory and log allowlists contain at most 128 exact `.service` names;
+the restart subset is limited to 32. Names may be template instances or aliases.
+No globs, paths, options, or shell expressions are accepted.
 Duplicates collapse and names sort lexicographically. An empty list grants no
 visibility. Only those names are queried, including inactive/failed units; this
 is **not** an enumeration of every unit on the machine. Select instances such as
 `worker@blue.service` rather than an uninstantiated template.
 
+`restart_token` and `restart_units` are optional and restart is disabled unless
+both are configured. The restart token must be distinct from the read and log-read
+tokens. The restart list is a non-empty subset of `units` with at most 32 exact
+names. For safe exact PolicyKit matching, restart names cannot contain backslash escapes.
+Units such as `stardust.service`, `sshd.service`, or other protected services
+remain denied unless an administrator deliberately adds them to **both** the
+restart allowlist and the PolicyKit rule. Do not do so casually.
+
 All inventory list/detail requests require `Authorization: Bearer <token>`.
 Missing/incorrect credentials return 401 with a Bearer challenge; an authenticated
 request for a non-allowlisted unit returns 403 without querying systemd. Token
-hashes are compared in constant time. The inventory token grants read-only
-service metadata access, not log-read or mutation permissions. Log access has an
-independent token and exact `.service` allowlist under `logs`; reusing the
-inventory token is rejected. An omitted `logs` object disables log access. Empty
-log allowlists grant no access. Keep both secrets in the same private policy file
-and deliver them to authorized clients separately. Clients must store each token
-in a private credential file/store, add headers in memory (not command arguments),
-and redact them from diagnostics. Never forward either token to another server.
+hashes are compared in constant time. The inventory token grants service
+metadata access only, not logs or mutation. Log access requires the independent
+`logs.token` and its own allowlist; restart requires a separate `restart_token`
+and `restart_units` subset. All three credentials must be distinct. Keep each
+token in the private policy file and deliver it only to authorized clients.
+Clients must store each token in a private credential file/store, add headers in
+memory (not command arguments), and redact them from diagnostics. Never forward
+a token to a different server.
 
 This preserves the existing health/metrics authentication policy; it does **not**
 resolve the broader same-host metrics protection issue
@@ -87,6 +99,81 @@ access denial returns `services_permission_denied`. Older agents return 404 for 
 clients must keep their existing metrics view and mark inventory unsupported.
 `logs` is true only when both the authorized log policy and supported journal
 backend are configured.
+
+When a restart policy and its private operation store are available, `restart`
+is `true` and `restart_authentication` is `"bearer"`. This advertises API
+availability, not that the host's PolicyKit rule is installed; a missing or
+incorrect rule fails the operation closed with a permission error.
+
+## Explicitly authorized restarts
+
+Restarts are opt-in and use a credential separate from read access. The
+administrator must configure both `restart_token` and a narrow `restart_units`
+subset, and install a PolicyKit rule that grants only the systemd
+`manage-units` action, verb `restart`, user `stardust`, and the exact same unit
+names. An example rule is in
+[`deploy/systemd/50-stardust-restart.rules.example`](../deploy/systemd/50-stardust-restart.rules.example).
+Install a reviewed, root-owned copy under `/etc/polkit-1/rules.d/`; do not grant
+wildcards, other verbs, other users, or general `systemctl` access. If the
+service account name is customized, update the rule accordingly. PolicyKit and
+the service policy must be kept in sync; either layer can only narrow access.
+
+Stardust stays unprivileged and retains `NoNewPrivileges=true`. It invokes only
+`/usr/bin/systemctl restart <validated-unit>` with a fixed environment and no
+shell. It does not use sudo, edit unit files, accept command options, or signal
+PIDs. With no matching PolicyKit rule, systemd rejects the request. The operation
+state is kept in the private `/var/lib/stardust` state directory (created by the
+systemd unit) so retries remain deduplicated across daemon restarts.
+
+```http
+POST /api/v1/services/nginx.service/restart
+Authorization: Bearer <restart-token>
+Idempotency-Key: <32-128 cryptographically random printable ASCII characters>
+```
+
+The request must have an empty body, no `Origin` header, and exactly one
+idempotency key. The endpoint is state-changing; GET never restarts anything.
+The first accepted request returns `202 Accepted` with an `operation_id` and
+`running` state. Repeat the same unit/key pair to recover the same operation
+(HTTP 200); reusing a key for another unit returns 409. A different key for a
+unit with an active operation also returns 409. Generate a fresh random key per
+intent and reuse it only when retrying that intent after an uncertain response.
+
+Poll `GET /api/v1/service-operations/{operation_id}` with the restart token. Polls
+are read-only and return the same operation object. Records and idempotency
+hashes expire after 24 hours; the operation store is capped at 1024 records.
+Clients must never reuse an old key for a new intent; after the 24-hour retention
+window the same key is treated as new and can start another restart. A
+restart interrupted by daemon shutdown/reboot is marked `interrupted` and is
+never replayed. Status polling returns 404 after expiry. The raw idempotency key
+and either bearer token are never persisted or logged. Audit records/log entries
+include operation ID, unit, caller address, request/completion time, and result;
+caller control characters are escaped.
+
+Terminal states are `succeeded`, `failed`, `timed_out`, `cancelled`, or
+`interrupted`. `job_result` distinguishes `succeeded`, `failed`, `not_started`,
+and `unknown` (for timeout/cancellation). A successful systemd job is followed
+by a best-effort live state observation (`active_state` and `sub_state`); an
+observation failure is reported separately. `active` is systemd state, **not** an
+application health check. The API does not retry a failed or uncertain job on
+its own.
+
+Restart authentication is separate from inventory authentication. A read token
+or the existing health/metrics token cannot authorize restart. Status polling
+also requires the restart token. Requests with an `Origin` header are rejected;
+there is no CORS support. Loopback-only binding remains mandatory and HTTP is
+not encrypted, so remote use requires a trusted SSH tunnel and secure client-side
+credential storage.
+
+For a disposable-host integration check only: install a fresh copy of the unit,
+configure a harmless test service and a distinct random restart token, then add
+that single service to both allowlists. Install the example PolicyKit rule as a
+root-owned file, validate it with the host's PolicyKit tooling, restart Stardust,
+and verify that one authenticated POST returns an operation ID and that polling
+reports the systemd job result. Also verify missing/wrong credentials, a unit
+outside either allowlist, and an otherwise valid unit absent from PolicyKit are
+denied. Remove the test rule and policy afterward. Do not perform this test on
+production or restart real services during development.
 
 ## List and details
 
@@ -143,13 +230,14 @@ configured unit remains visible in lists with `load_state: "not-found"`,
 zero PID, and empty optional metadata. Direct detail lookup returns 404 instead.
 Other backend errors fail the page, never masquerading as an empty inventory.
 
-All service/capability responses use `Cache-Control: no-store`. Non-GET methods
-return 405 and `Allow: GET`. Errors use the existing v1 error envelope:
+All service/capability responses use `Cache-Control: no-store`. Inventory, log,
+and capability routes are GET-only and return 405 with `Allow: GET` for other
+methods; restart routes accept only POST. Errors use the existing v1 envelope:
 
 | HTTP | Error code | Meaning |
 | --- | --- | --- |
 | 400 | `invalid_unit` / `invalid_query` | Invalid identity, query, or cursor |
-| 401 | `unauthorized` | Missing/invalid service read credential |
+| 401 | `unauthorized` | Missing/invalid service read or restart credential |
 | 403 | `unit_forbidden` | Unit outside configured policy |
 | 404 | `unit_not_found` | Allowed unit does not exist |
 | 501 | `services_unsupported` | Host does not support systemd inventory |
@@ -157,6 +245,13 @@ return 405 and `Allow: GET`. Errors use the existing v1 error envelope:
 | 503 | `services_permission_denied` | systemd access denied |
 | 503 | `services_unavailable` | Backend missing or unavailable |
 | 504 | `services_timeout` | Request deadline/cancellation |
+
+Restart responses additionally use 400 `invalid_request` /
+`invalid_idempotency_key`, 403
+`origin_forbidden`, 404 `operation_not_found`, 409 `idempotency_conflict` /
+`unit_busy`, 503 `restart_disabled` / `restart_unavailable` /
+`restart_capacity`, and 501 `services_unsupported`. Errors never include
+systemd or PolicyKit command output.
 
 ## Read-only service logs
 
@@ -253,15 +348,13 @@ output. Stardust does not cache or retain logs.
 
 ## Execution and validation limits
 
-Stardust stays unprivileged. Reads use `/usr/bin/systemctl show` with a fixed
-property list and argument vector, no shell or PATH lookup, and a minimal fixed
-environment. Deployments with systemctl elsewhere are currently unavailable.
-Output is capped at 64 KiB per unit; the whole page shares the HTTP request
-deadline, and process pipe cleanup is bounded. No sudo, PolicyKit changes,
-supplementary groups, or service mutations are introduced. Service descriptions
-remain untrusted data; Orbit must neutralize terminal control sequences before
-rendering them. Kernel process names are sanitized for control characters but
-should still be rendered as text.
+Reads use `/usr/bin/systemctl show` with a fixed property list and argument
+vector, no shell or PATH lookup, and a minimal fixed environment. Deployments
+with systemctl elsewhere are currently unavailable. Output is capped at 64 KiB
+per unit; the whole page shares the HTTP request deadline, and process pipe
+cleanup is bounded. Service descriptions remain untrusted data; Orbit must
+neutralize terminal control sequences before rendering them. Kernel process
+names are sanitized for control characters but should still be rendered as text.
 
 Automated tests use fake systemd output and API fixtures; they do not inspect or
 modify real services. A separately authorized disposable Linux host may be used
