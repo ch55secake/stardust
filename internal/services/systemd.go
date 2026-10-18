@@ -22,19 +22,37 @@ const (
 )
 
 type commandRunner func(context.Context, string) ([]byte, error)
+type restartCommandRunner func(context.Context, string) error
 
 type Systemd struct {
 	supported bool
 	run       commandRunner
+	restart   restartCommandRunner
 	procRoot  string
 }
 
 func NewSystemd() *Systemd {
 	_, err := os.Stat("/run/systemd/system")
-	return &Systemd{supported: runtime.GOOS == "linux" && err == nil, run: runSystemctl, procRoot: "/proc"}
+	return &Systemd{supported: runtime.GOOS == "linux" && err == nil, run: runSystemctl, restart: runSystemctlRestart, procRoot: "/proc"}
 }
 
 func (s *Systemd) Supported() bool { return s.supported }
+
+func (s *Systemd) Restart(ctx context.Context, name string) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if !ValidUnit(name) {
+		return ErrForbidden
+	}
+	if !s.supported {
+		return ErrUnsupported
+	}
+	if s.restart == nil {
+		return ErrUnavailable
+	}
+	return s.restart(ctx, name)
+}
 
 func (s *Systemd) Inspect(ctx context.Context, name string) (Unit, error) {
 	if ctx.Err() != nil {
@@ -159,13 +177,53 @@ func hasPermissionDenial(stderr string) bool {
 		strings.Contains(stderr, "access denied") ||
 		strings.Contains(stderr, "not authorized") ||
 		strings.Contains(stderr, "insufficient permissions") ||
-		strings.Contains(stderr, "not seeing messages from the system")
+		strings.Contains(stderr, "not seeing messages from the system") ||
+		strings.Contains(stderr, "not allowed to execute") ||
+		strings.Contains(stderr, "a password is required") ||
+		strings.Contains(stderr, "a terminal is required") ||
+		strings.Contains(stderr, "authentication is required") ||
+		strings.Contains(stderr, "interactive authentication required")
 }
 
 func systemctlCommand(ctx context.Context, name string) *exec.Cmd {
 	// No shell, PATH lookup, user-controlled options, inherited environment, or
 	// mutation verbs. -- prevents option injection.
 	command := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", "--no-pager", "--property=Id,Description,LoadState,ActiveState,SubState,UnitFileState,MainPID", "--", name)
+	command.Env = []string{"LANG=C", "LC_ALL=C", "SYSTEMD_COLORS=0"}
+	command.WaitDelay = time.Second
+	return command
+}
+
+func runSystemctlRestart(ctx context.Context, name string) error {
+	command := systemctlRestartCommand(ctx, name)
+	var stdout boundedBuffer
+	var stderr boundedBuffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err := command.Run()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err == nil {
+		return nil
+	}
+	if hasPermissionDenial(stderr.String()) {
+		return ErrPermissionDenied
+	}
+	if strings.Contains(strings.ToLower(stderr.String()), "not found") || strings.Contains(strings.ToLower(stderr.String()), "not loaded") {
+		return ErrNotFound
+	}
+	var pathError *os.PathError
+	if errors.As(err, &pathError) {
+		return ErrUnavailable
+	}
+	return ErrRestartFailed
+}
+
+func systemctlRestartCommand(ctx context.Context, name string) *exec.Cmd {
+	// A root-owned PolicyKit rule grants only the exact restart action and unit.
+	// The daemon itself stays unprivileged; no shell or user-controlled option is used.
+	command := exec.CommandContext(ctx, "/usr/bin/systemctl", "restart", name)
 	command.Env = []string{"LANG=C", "LC_ALL=C", "SYSTEMD_COLORS=0"}
 	command.WaitDelay = time.Second
 	return command

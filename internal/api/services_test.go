@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,11 +19,27 @@ import (
 )
 
 const serviceToken = "0123456789abcdef0123456789abcdef"
+const restartToken = "fedcba9876543210fedcba9876543210"
 
 type fakeInspector struct {
 	supported bool
 	names     []string
 	inspect   func(context.Context, string) (services.Unit, error)
+}
+
+type fakeRestarter struct {
+	supported bool
+	calls     atomic.Int32
+	restart   func(context.Context, string) error
+}
+
+func (f *fakeRestarter) Supported() bool { return f.supported }
+func (f *fakeRestarter) Restart(ctx context.Context, name string) error {
+	f.calls.Add(1)
+	if f.restart != nil {
+		return f.restart(ctx, name)
+	}
+	return nil
 }
 
 func (f *fakeInspector) Supported() bool { return f.supported }
@@ -46,6 +64,37 @@ func serviceRequest(handler http.Handler, method, path, token string) *httptest.
 	request := httptest.NewRequest(method, path, nil)
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func restartServiceHandler(t *testing.T, inspector *fakeInspector, restarter *fakeRestarter) (http.Handler, *services.RestartManager) {
+	t.Helper()
+	policy, err := services.NewPolicyWithRestart(serviceToken, []string{"a.service", "b.service"}, restartToken, []string{"a.service"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := services.NewRestartManager(filepath.Join(directory, "operations.json"), policy, restarter, inspector, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	return NewHandler(fixtureCollector{}, time.Second, testLogger(), WithServices(policy, inspector, manager)), manager
+}
+
+func restartRequest(handler http.Handler, method, path, token, key string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, path, nil)
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	if key != "" {
+		request.Header.Set("Idempotency-Key", key)
 	}
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
@@ -135,6 +184,120 @@ func TestServiceCapabilitiesDisabledUnsupportedAndEmpty(t *testing.T) {
 		if recorder := serviceRequest(empty, "GET", path, ""); recorder.Code != 200 {
 			t.Fatal(recorder.Body.String())
 		}
+	}
+}
+
+func TestRestartEndpointFailsClosedBeforeMutation(t *testing.T) {
+	inspector := &fakeInspector{supported: true}
+	restarter := &fakeRestarter{supported: true}
+	handler, _ := restartServiceHandler(t, inspector, restarter)
+	key := strings.Repeat("i", 32)
+	for _, test := range []struct {
+		name, method, path, token string
+		wantCode                  int
+		wantAllow                 string
+	}{
+		{"GET does not mutate", http.MethodGet, "/api/v1/services/a.service/restart", restartToken, http.StatusMethodNotAllowed, http.MethodPost},
+		{"missing restart token", http.MethodPost, "/api/v1/services/a.service/restart", "", http.StatusUnauthorized, ""},
+		{"read token is insufficient", http.MethodPost, "/api/v1/services/a.service/restart", serviceToken, http.StatusUnauthorized, ""},
+		{"unit outside restart allowlist", http.MethodPost, "/api/v1/services/b.service/restart", restartToken, http.StatusForbidden, ""},
+		{"malformed unit", http.MethodPost, "/api/v1/services/bad;id.service/restart", restartToken, http.StatusBadRequest, ""},
+		{"query parameters rejected", http.MethodPost, "/api/v1/services/a.service/restart?unexpected=true", restartToken, http.StatusBadRequest, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := restartRequest(handler, test.method, test.path, test.token, key)
+			if recorder.Code != test.wantCode {
+				t.Fatalf("got %d want %d: %s", recorder.Code, test.wantCode, recorder.Body.String())
+			}
+			if test.wantAllow != "" && recorder.Header().Get("Allow") != test.wantAllow {
+				t.Fatalf("Allow = %q", recorder.Header().Get("Allow"))
+			}
+			if recorder.Header().Get("Cache-Control") != "no-store" {
+				t.Fatal("restart response may be cached")
+			}
+		})
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/services/a.service/restart", nil)
+	request.Header.Set("Authorization", "Bearer "+restartToken)
+	request.Header.Set("Idempotency-Key", key)
+	request.Header.Set("Origin", "https://attacker.example")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "origin_forbidden") {
+		t.Fatalf("Origin request was not rejected: %d %s", recorder.Code, recorder.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/services/a.service/restart", strings.NewReader("unexpected body"))
+	request.Header.Set("Authorization", "Bearer "+restartToken)
+	request.Header.Set("Idempotency-Key", key)
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("request body accepted: %d %s", recorder.Code, recorder.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/services/a.service/restart", nil)
+	request.Header.Set("Authorization", "Bearer "+restartToken)
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "invalid_idempotency_key") {
+		t.Fatalf("missing idempotency key accepted: %d %s", recorder.Code, recorder.Body.String())
+	}
+	if restarter.calls.Load() != 0 || len(inspector.names) != 0 {
+		t.Fatalf("rejected request reached backend: restarts=%d inspections=%v", restarter.calls.Load(), inspector.names)
+	}
+}
+
+func TestRestartEndpointIdempotencyStatusAndSeparateAuthorization(t *testing.T) {
+	inspector := &fakeInspector{supported: true}
+	restarter := &fakeRestarter{supported: true}
+	handler, manager := restartServiceHandler(t, inspector, restarter)
+	key := strings.Repeat("r", 40)
+	recorder := restartRequest(handler, http.MethodPost, "/api/v1/services/a.service/restart", restartToken, key)
+	if recorder.Code != http.StatusAccepted || !strings.Contains(recorder.Body.String(), `"state":"running"`) {
+		t.Fatalf("restart was not accepted asynchronously: %d %s", recorder.Code, recorder.Body.String())
+	}
+	var accepted struct {
+		Data services.RestartOperation `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &accepted); err != nil || accepted.Data.ID == "" {
+		t.Fatalf("operation ID missing: %s (%v)", recorder.Body.String(), err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		operation, err := manager.Status(accepted.Data.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if operation.State != services.RestartRunning {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	statusPath := "/api/v1/service-operations/" + accepted.Data.ID
+	if recorder := restartRequest(handler, http.MethodGet, statusPath, serviceToken, ""); recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("read token authorized status polling: %d %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder := restartRequest(handler, http.MethodGet, statusPath, restartToken, ""); recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"state":"succeeded"`) {
+		t.Fatalf("restart status unavailable: %d %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder := restartRequest(handler, http.MethodPost, statusPath, restartToken, ""); recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status endpoint accepted a mutating method: %d %s", recorder.Code, recorder.Body.String())
+	}
+	recorder = restartRequest(handler, http.MethodPost, "/api/v1/services/a.service/restart", restartToken, key)
+	if recorder.Code != http.StatusOK || restarter.calls.Load() != 1 {
+		t.Fatalf("retry did not return prior operation: %d calls=%d %s", recorder.Code, restarter.calls.Load(), recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), restartToken) || strings.Contains(recorder.Body.String(), key) {
+		t.Fatal("credential or idempotency key leaked in response")
+	}
+}
+
+func TestRestartEndpointUnsupportedHostFailsClosed(t *testing.T) {
+	inspector := &fakeInspector{}
+	restarter := &fakeRestarter{supported: true}
+	handler, _ := restartServiceHandler(t, inspector, restarter)
+	recorder := restartRequest(handler, http.MethodPost, "/api/v1/services/a.service/restart", restartToken, strings.Repeat("u", 32))
+	if recorder.Code != http.StatusNotImplemented || !strings.Contains(recorder.Body.String(), "services_unsupported") || restarter.calls.Load() != 0 {
+		t.Fatalf("unsupported host did not fail closed: %d %s", recorder.Code, recorder.Body.String())
 	}
 }
 

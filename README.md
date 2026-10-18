@@ -1,8 +1,9 @@
 # Stardust
 
 Stardust is a lightweight Linux and macOS telemetry agent for Orbit. It runs
-without root privileges, keeps no persistent state, and binds to loopback by
-default so Orbit can reach it through an SSH port forward.
+without root privileges and binds to loopback by default so Orbit can reach it
+through an SSH port forward. Restart operation metadata is persisted only when
+that explicitly configured feature is enabled.
 
 ## Features
 
@@ -221,15 +222,16 @@ returns HTTP 503.
 
 ### Read-only systemd services and logs
 
-Optional authenticated service list/detail and separately authorized service log
-endpoints are documented in
+Optional authenticated service list/detail, separately authorized service logs,
+and opt-in service restarts are documented in
 [`docs/services-api.md`](docs/services-api.md), including capability discovery,
-pagination, errors, and client credential handling. Inventory and logs are
-disabled by default; inventory requires a private policy file with a read token
-and exact unit allowlist. Logs require a distinct log-read token and independent
-unit allowlist. Journal permission is never added by the installer. This does not
-grant restart privileges, change the existing health/metrics policy, or add
-support for non-loopback listeners.
+pagination, errors, and client credential handling. Inventory, logs, and
+restart operations are disabled by default. Inventory requires a private policy
+file with a read token and exact unit allowlist; logs require a distinct log-read
+token and independent unit allowlist. Restart requires a third credential, an
+exact unit subset, and a matching administrator-managed PolicyKit rule. Journal
+permission is never added by the installer. See [`docs/services-api.md`](docs/services-api.md)
+for setup and security details. Non-loopback listeners remain unsupported.
 
 ### Installing the agent service
 

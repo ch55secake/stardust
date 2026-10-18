@@ -1,0 +1,12 @@
+// Example only. Install as a root-owned file in /etc/polkit-1/rules.d/ after
+// replacing the unit list with the exact same units in restart_units. Keep this
+// file administrator-owned and do not grant wildcards or manage-unit actions.
+polkit.addRule(function(action, subject) {
+    var units = ["nginx.service"];
+    if (subject.user === "stardust" &&
+        action.id === "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("verb") === "restart" &&
+        units.indexOf(action.lookup("unit")) !== -1) {
+        return polkit.Result.YES;
+    }
+});

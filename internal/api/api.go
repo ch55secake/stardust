@@ -25,6 +25,7 @@ type Handler struct {
 	logPolicy        *services.Policy
 	journalReader    services.JournalReader
 	logSlots         chan struct{}
+	restartManager   *services.RestartManager
 	apiTokenHash     [sha256.Size]byte
 	apiAuthEnabled   bool
 }

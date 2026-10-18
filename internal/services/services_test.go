@@ -82,9 +82,56 @@ func TestLogReadPolicyHasIndependentCredentialAndAllowlist(t *testing.T) {
 	}
 }
 
+func TestRestartPolicyIsDistinctOptInSubset(t *testing.T) {
+	const restartToken = "fedcba9876543210fedcba9876543210"
+	policy, err := NewPolicyWithRestart(testToken, []string{"a.service", "worker@blue.service", `escaped@a\x2db.service`}, restartToken, []string{"worker@blue.service", "worker@blue.service"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.RestartEnabled() || !policy.RestartAuthorized(restartToken) || policy.RestartAuthorized(testToken) || policy.Authorized(restartToken) {
+		t.Fatal("restart and read permissions are not independent")
+	}
+	if !policy.AllowsRestart("worker@blue.service") || policy.AllowsRestart("a.service") {
+		t.Fatal("restart permission did not preserve the explicit subset")
+	}
+	logToken := "abcdef0123456789abcdef0123456789"
+	withLogs, err := NewPolicyWithLogsAndRestart(testToken, []string{"worker@blue.service"}, logToken, []string{"worker@blue.service"}, restartToken, []string{"worker@blue.service"})
+	if err != nil || !withLogs.LogReadPolicy().Authorized(logToken) || !withLogs.RestartAuthorized(restartToken) {
+		t.Fatalf("combined policy did not retain separate capabilities: %v", err)
+	}
+	if _, err := NewPolicyWithLogsAndRestart(testToken, []string{"worker@blue.service"}, logToken, []string{"worker@blue.service"}, logToken, []string{"worker@blue.service"}); err == nil {
+		t.Fatal("shared log and restart credential accepted")
+	}
+	units := policy.RestartUnits()
+	units[0] = "changed.service"
+	if !policy.AllowsRestart("worker@blue.service") {
+		t.Fatal("caller mutated restart allowlist")
+	}
+	for _, test := range []struct {
+		name         string
+		token        string
+		inventory    []string
+		restartUnits []string
+	}{
+		{"same token", testToken, []string{"a.service"}, []string{"a.service"}},
+		{"missing restart token", "", []string{"a.service"}, []string{"a.service"}},
+		{"empty restart allowlist", restartToken, []string{"a.service"}, nil},
+		{"outside inventory", restartToken, []string{"a.service"}, []string{"b.service"}},
+		{"unsafe escaped unit", restartToken, []string{`escaped@a\x2db.service`}, []string{`escaped@a\x2db.service`}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewPolicyWithRestart(testToken, test.inventory, test.token, test.restartUnits); err == nil {
+				t.Fatal("invalid restart policy accepted")
+			}
+		})
+	}
+}
+
 func TestLoadPolicyPrivateFileAndSafeErrors(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "policy.json")
 	valid := `{"token":"` + testToken + `","units":["sshd.service"]}`
+	logToken := "abcdef0123456789abcdef0123456789"
+	restartToken := "fedcba9876543210fedcba9876543210"
 	for _, test := range []struct {
 		name, body string
 		mode       os.FileMode
@@ -93,9 +140,12 @@ func TestLoadPolicyPrivateFileAndSafeErrors(t *testing.T) {
 		{"private", valid, 0600, true},
 		{"readonly", valid, 0400, true},
 		{"empty allowlist", `{"token":"` + testToken + `","units":[]}`, 0600, true},
-		{"separate log policy", `{"token":"` + testToken + `","units":["web.service"],"logs":{"token":"abcdef0123456789abcdef0123456789","units":["web.service"]}}`, 0600, true},
+		{"separate log policy", `{"token":"` + testToken + `","units":["web.service"],"logs":{"token":"` + logToken + `","units":["web.service"]}}`, 0600, true},
+		{"combined log and restart policy", `{"token":"` + testToken + `","units":["web.service"],"logs":{"token":"` + logToken + `","units":["web.service"]},"restart_token":"` + restartToken + `","restart_units":["web.service"]}`, 0600, true},
+		{"shared log and restart token", `{"token":"` + testToken + `","units":["web.service"],"logs":{"token":"` + logToken + `","units":["web.service"]},"restart_token":"` + logToken + `","restart_units":["web.service"]}`, 0600, false},
+		{"restart unit outside inventory", `{"token":"` + testToken + `","units":["web.service"],"restart_token":"` + restartToken + `","restart_units":["private.service"]}`, 0600, false},
 		{"same log token", `{"token":"` + testToken + `","units":[],"logs":{"token":"` + testToken + `","units":[]}}`, 0600, false},
-		{"invalid log unit", `{"token":"` + testToken + `","units":[],"logs":{"token":"abcdef0123456789abcdef0123456789","units":["*.service"]}}`, 0600, false},
+		{"invalid log unit", `{"token":"` + testToken + `","units":[],"logs":{"token":"` + logToken + `","units":["*.service"]}}`, 0600, false},
 		{"public", valid, 0644, false},
 		{"group readable", valid, 0640, false},
 		{"invalid JSON", testToken, 0600, false},
@@ -134,6 +184,22 @@ func TestLoadPolicyPrivateFileAndSafeErrors(t *testing.T) {
 	}
 	if _, err := LoadPolicy(link); err == nil {
 		t.Fatal("symlink accepted")
+	}
+}
+
+func TestLoadPolicyRestartCredentials(t *testing.T) {
+	const restartToken = "fedcba9876543210fedcba9876543210"
+	path := filepath.Join(t.TempDir(), "policy.json")
+	content := `{"token":"` + testToken + `","units":["nginx.service","worker@blue.service"],"restart_token":"` + restartToken + `","restart_units":["nginx.service"]}`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := LoadPolicy(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.Authorized(testToken) || !policy.RestartAuthorized(restartToken) || policy.RestartAuthorized(testToken) || !policy.AllowsRestart("nginx.service") || policy.AllowsRestart("worker@blue.service") {
+		t.Fatal("loaded policy did not preserve separate restart authorization")
 	}
 }
 
@@ -261,6 +327,7 @@ func TestPermissionDenialClassificationDoesNotExposeStderr(t *testing.T) {
 		"Failed to get properties: Access denied.",
 		"permission denied while reading service properties",
 		"Not authorized to perform operation",
+		"Interactive authentication required",
 	} {
 		if !hasPermissionDenial(stderr) {
 			t.Errorf("permission denial not recognized: %q", stderr)
@@ -285,5 +352,16 @@ func TestSystemctlCommandIsReadOnlyAndDoesNotUseShell(t *testing.T) {
 	}
 	if !reflect.DeepEqual(command.Env, []string{"LANG=C", "LC_ALL=C", "SYSTEMD_COLORS=0"}) || command.WaitDelay <= 0 {
 		t.Fatal("unbounded cleanup or inherited environment")
+	}
+}
+
+func TestSystemctlRestartCommandIsExactAndDoesNotElevateDaemon(t *testing.T) {
+	command := systemctlRestartCommand(context.Background(), "worker@blue.service")
+	want := []string{"/usr/bin/systemctl", "restart", "worker@blue.service"}
+	if command.Path != "/usr/bin/systemctl" || !reflect.DeepEqual(command.Args, want) {
+		t.Fatalf("unsafe restart command: %+v", command.Args)
+	}
+	if !reflect.DeepEqual(command.Env, []string{"LANG=C", "LC_ALL=C", "SYSTEMD_COLORS=0"}) || command.WaitDelay <= 0 {
+		t.Fatal("restart command has inherited environment or unbounded cleanup")
 	}
 }

@@ -1,4 +1,4 @@
-// Package services provides read-only, explicitly allowlisted systemd metadata.
+// Package services provides explicitly allowlisted systemd metadata and control.
 package services
 
 import (
@@ -17,15 +17,26 @@ import (
 )
 
 var (
-	ErrUnsupported      = errors.New("systemd service inventory is unsupported on this host")
-	ErrUnavailable      = errors.New("systemd is unavailable")
-	ErrPermissionDenied = errors.New("systemd access was denied")
-	ErrNotFound         = errors.New("service unit not found")
-	ErrForbidden        = errors.New("service unit is not allowed")
-	unitPattern         = regexp.MustCompile(`^[A-Za-z0-9_:@.\\-]+\.service$`)
+	ErrUnsupported         = errors.New("systemd service inventory is unsupported on this host")
+	ErrUnavailable         = errors.New("systemd is unavailable")
+	ErrPermissionDenied    = errors.New("systemd access was denied")
+	ErrNotFound            = errors.New("service unit not found")
+	ErrForbidden           = errors.New("service unit is not allowed")
+	ErrRestartFailed       = errors.New("systemd restart job failed")
+	ErrRestartDisabled     = errors.New("service restart is disabled")
+	ErrUnitBusy            = errors.New("service already has a restart operation in progress")
+	ErrIdempotencyConflict = errors.New("idempotency key was already used for a different unit")
+	ErrOperationNotFound   = errors.New("restart operation not found")
+	ErrOperationStore      = errors.New("restart operation store is unavailable")
+	ErrOperationLimit      = errors.New("restart operation capacity is full")
+	unitPattern            = regexp.MustCompile(`^[A-Za-z0-9_:@.\\-]+\.service$`)
+	restartUnitPattern     = regexp.MustCompile(`^[A-Za-z0-9_:@.-]+\.service$`)
 )
 
-const MaxUnits = 128
+const (
+	MaxUnits        = 128
+	MaxRestartUnits = 32
+)
 
 type Unit struct {
 	Name          string           `json:"name"`
@@ -50,41 +61,101 @@ type Inspector interface {
 	Inspect(context.Context, string) (Unit, error)
 }
 
+// Restarter performs exactly one allowlisted systemd restart; it must not accept
+// arbitrary commands or expose process configuration.
+type Restarter interface {
+	Supported() bool
+	Restart(context.Context, string) error
+}
+
 // Policy is immutable after construction. The bearer token is never exported.
 type Policy struct {
-	tokenHash [32]byte
-	units     []string
-	logRead   *Policy
+	tokenHash        [32]byte
+	units            []string
+	logRead          *Policy
+	restartTokenHash [32]byte
+	restartUnits     []string
 }
 
 func ValidUnit(name string) bool {
 	return len(name) <= 255 && unitPattern.MatchString(name) && name != ".service" && !strings.Contains(name, "..") && !strings.HasPrefix(name, "-")
 }
 
+// ValidRestartUnit excludes backslash escapes so an exact unit argument can be
+// represented safely in a narrowly scoped PolicyKit rule without pattern syntax.
+func ValidRestartUnit(name string) bool {
+	return ValidUnit(name) && restartUnitPattern.MatchString(name)
+}
+
 func NewPolicy(token string, units []string) (*Policy, error) {
-	return newPolicy(token, units)
+	return NewPolicyWithLogsAndRestart(token, units, "", nil, "", nil)
 }
 
 // NewPolicyWithLogs enables an independently authenticated, independently
-// allowlisted journal-read capability. The log credential cannot be the service
-// inventory credential, preventing an inventory client from inheriting log access.
+// allowlisted journal-read capability.
 func NewPolicyWithLogs(token string, units []string, logToken string, logUnits []string) (*Policy, error) {
+	if _, err := newPolicy(logToken, logUnits); err != nil {
+		return nil, fmt.Errorf("invalid log read policy: %w", err)
+	}
+	return NewPolicyWithLogsAndRestart(token, units, logToken, logUnits, "", nil)
+}
+
+// NewPolicyWithRestart independently configures read and restart authority.
+func NewPolicyWithRestart(token string, units []string, restartToken string, restartUnits []string) (*Policy, error) {
+	return NewPolicyWithLogsAndRestart(token, units, "", nil, restartToken, restartUnits)
+}
+
+// NewPolicyWithLogsAndRestart creates independent read, journal-read, and
+// restart credentials. Restart units must also be visible in inventory.
+func NewPolicyWithLogsAndRestart(token string, units []string, logToken string, logUnits []string, restartToken string, restartUnits []string) (*Policy, error) {
 	policy, err := newPolicy(token, units)
 	if err != nil {
 		return nil, err
 	}
-	if token == logToken {
-		return nil, errors.New("service and log read tokens must be different")
+	readTokenHash := policy.tokenHash
+	if logToken != "" || logUnits != nil {
+		logTokenHash := sha256.Sum256([]byte(logToken))
+		if subtle.ConstantTimeCompare(readTokenHash[:], logTokenHash[:]) == 1 {
+			return nil, errors.New("service and log read tokens must be different")
+		}
+		policy.logRead, err = newPolicy(logToken, logUnits)
+		if err != nil {
+			return nil, fmt.Errorf("invalid log read policy: %w", err)
+		}
 	}
-	policy.logRead, err = newPolicy(logToken, logUnits)
-	if err != nil {
-		return nil, fmt.Errorf("invalid log read policy: %w", err)
+	if restartToken == "" && len(restartUnits) == 0 {
+		return policy, nil
 	}
+	if !validServiceToken(restartToken) {
+		return nil, errors.New("restart token must contain 32–256 printable non-space ASCII characters")
+	}
+	if len(restartUnits) == 0 {
+		return nil, errors.New("restart token requires a non-empty restart unit allowlist")
+	}
+	if len(restartUnits) > MaxRestartUnits {
+		return nil, fmt.Errorf("restart allowlist exceeds %d units", MaxRestartUnits)
+	}
+	restartTokenHash := sha256.Sum256([]byte(restartToken))
+	if subtle.ConstantTimeCompare(readTokenHash[:], restartTokenHash[:]) == 1 {
+		return nil, errors.New("service read and restart tokens must be different")
+	}
+	if policy.logRead != nil && subtle.ConstantTimeCompare(policy.logRead.tokenHash[:], restartTokenHash[:]) == 1 {
+		return nil, errors.New("log read and restart tokens must be different")
+	}
+	restartUnits = slices.Clone(restartUnits)
+	for _, unit := range restartUnits {
+		if !ValidRestartUnit(unit) || !slices.Contains(policy.units, unit) {
+			return nil, errors.New("restart allowlist must contain valid units from the service inventory allowlist")
+		}
+	}
+	slices.Sort(restartUnits)
+	policy.restartTokenHash = restartTokenHash
+	policy.restartUnits = slices.Compact(restartUnits)
 	return policy, nil
 }
 
 func newPolicy(token string, units []string) (*Policy, error) {
-	if len(token) < 32 || len(token) > 256 || strings.IndexFunc(token, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {
+	if !validServiceToken(token) {
 		return nil, errors.New("service token must contain 32–256 printable non-space ASCII characters")
 	}
 	if len(units) > MaxUnits {
@@ -98,6 +169,10 @@ func newPolicy(token string, units []string) (*Policy, error) {
 	}
 	slices.Sort(units)
 	return &Policy{tokenHash: sha256.Sum256([]byte(token)), units: slices.Compact(units)}, nil
+}
+
+func validServiceToken(token string) bool {
+	return len(token) >= 32 && len(token) <= 256 && strings.IndexFunc(token, func(r rune) bool { return r < 33 || r > 126 }) < 0
 }
 
 // LoadPolicy reads credentials from a regular, private file owned by the daemon
@@ -131,6 +206,8 @@ func LoadPolicy(path string) (*Policy, error) {
 			Token string   `json:"token"`
 			Units []string `json:"units"`
 		} `json:"logs,omitempty"`
+		RestartToken string   `json:"restart_token"`
+		RestartUnits []string `json:"restart_units"`
 	}
 	decoder := json.NewDecoder(io.LimitReader(file, 64*1024+1))
 	decoder.DisallowUnknownFields()
@@ -141,10 +218,16 @@ func LoadPolicy(path string) (*Policy, error) {
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return nil, errors.New("invalid trailing service policy data")
 	}
-	if config.Logs == nil {
-		return NewPolicy(config.Token, config.Units)
+	if config.Logs != nil {
+		if _, err := newPolicy(config.Logs.Token, config.Logs.Units); err != nil {
+			return nil, errors.New("invalid log read policy")
+		}
 	}
-	return NewPolicyWithLogs(config.Token, config.Units, config.Logs.Token, config.Logs.Units)
+	logToken, logUnits := "", []string(nil)
+	if config.Logs != nil {
+		logToken, logUnits = config.Logs.Token, config.Logs.Units
+	}
+	return NewPolicyWithLogsAndRestart(config.Token, config.Units, logToken, logUnits, config.RestartToken, config.RestartUnits)
 }
 
 func (p *Policy) Authorized(token string) bool {
@@ -170,5 +253,25 @@ func (p *Policy) Allows(unit string) bool {
 		return false
 	}
 	_, found := slices.BinarySearch(p.units, unit)
+	return found
+}
+
+func (p *Policy) RestartAuthorized(token string) bool {
+	if p == nil || len(p.restartUnits) == 0 {
+		return false
+	}
+	hash := sha256.Sum256([]byte(token))
+	return subtle.ConstantTimeCompare(hash[:], p.restartTokenHash[:]) == 1
+}
+
+func (p *Policy) RestartEnabled() bool { return p != nil && len(p.restartUnits) > 0 }
+
+func (p *Policy) RestartUnits() []string { return slices.Clone(p.restartUnits) }
+
+func (p *Policy) AllowsRestart(unit string) bool {
+	if p == nil {
+		return false
+	}
+	_, found := slices.BinarySearch(p.restartUnits, unit)
 	return found
 }
