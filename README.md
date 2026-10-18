@@ -118,8 +118,9 @@ Metric semantics:
   `--disk-path`; sizes are bytes and the percentage is 0-100.
 - `network` reports cumulative bytes and packets sent/received, summed across
   all interfaces reported by the OS, including loopback and virtual interfaces.
-  These counters can reset on reboot or interface reset, and forwarded traffic
-  may be counted on more than one interface.
+  Its `interfaces` array reports the same counters by interface name. These
+  counters can reset on reboot or interface reset, and forwarded traffic may be
+  counted on more than one interface. They are cumulative totals, not rates.
 
 If an individual metric is unavailable, the response still returns available
 data and includes a `data.errors` array with the metric name and reason. The
@@ -147,7 +148,16 @@ returns HTTP 503.
       "bytes_received": 1000,
       "bytes_sent": 500,
       "packets_received": 20,
-      "packets_sent": 10
+      "packets_sent": 10,
+      "interfaces": [
+        {
+          "name": "eth0",
+          "bytes_received": 1000,
+          "bytes_sent": 500,
+          "packets_received": 20,
+          "packets_sent": 10
+        }
+      ]
     }
   }
 }

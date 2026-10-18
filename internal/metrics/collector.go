@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -14,7 +15,8 @@ import (
 // Snapshot is the stable metrics payload exposed by the v1 API. Byte fields
 // are bytes, percentages are in the inclusive range 0-100, and uptime is in
 // seconds. CPU usage is a non-blocking delta since the previous CPU sample;
-// network counters are cumulative totals aggregated over all interfaces.
+// network counters are cumulative totals aggregated over all interfaces, with
+// the same counters also available per interface.
 type Snapshot struct {
 	Hostname string        `json:"hostname"`
 	OS       OSInfo        `json:"os"`
@@ -65,6 +67,15 @@ type Disk struct {
 }
 
 type Network struct {
+	BytesReceived   uint64             `json:"bytes_received"`
+	BytesSent       uint64             `json:"bytes_sent"`
+	PacketsReceived uint64             `json:"packets_received"`
+	PacketsSent     uint64             `json:"packets_sent"`
+	Interfaces      []NetworkInterface `json:"interfaces"`
+}
+
+type NetworkInterface struct {
+	Name            string `json:"name"`
 	BytesReceived   uint64 `json:"bytes_received"`
 	BytesSent       uint64 `json:"bytes_sent"`
 	PacketsReceived uint64 `json:"packets_received"`
@@ -105,7 +116,7 @@ func NewCollector(timeout time.Duration, diskPath string) *Collector {
 			swapMemory:    mem.SwapMemoryWithContext,
 			diskUsage:     disk.UsageWithContext,
 			networkCounters: func(ctx context.Context) ([]psnet.IOCountersStat, error) {
-				return psnet.IOCountersWithContext(ctx, false)
+				return psnet.IOCountersWithContext(ctx, true)
 			},
 		},
 	}
@@ -206,15 +217,26 @@ func (c *Collector) Collect(ctx context.Context) (Snapshot, error) {
 		return snapshot, err
 	}
 
+	snapshot.Network.Interfaces = []NetworkInterface{}
 	interfaces, err := c.functions.networkCounters(ctx)
 	if err != nil {
 		addError("network", err)
 	} else {
+		sort.Slice(interfaces, func(i, j int) bool {
+			return interfaces[i].Name < interfaces[j].Name
+		})
 		for _, iface := range interfaces {
 			snapshot.Network.BytesReceived += iface.BytesRecv
 			snapshot.Network.BytesSent += iface.BytesSent
 			snapshot.Network.PacketsReceived += iface.PacketsRecv
 			snapshot.Network.PacketsSent += iface.PacketsSent
+			snapshot.Network.Interfaces = append(snapshot.Network.Interfaces, NetworkInterface{
+				Name:            iface.Name,
+				BytesReceived:   iface.BytesRecv,
+				BytesSent:       iface.BytesSent,
+				PacketsReceived: iface.PacketsRecv,
+				PacketsSent:     iface.PacketsSent,
+			})
 		}
 	}
 	if err := ctx.Err(); err != nil {
