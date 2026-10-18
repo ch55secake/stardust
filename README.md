@@ -60,6 +60,9 @@ The default listener is `127.0.0.1:8787`. Useful options:
   --disk-path /
 ```
 
+Listener ports must be decimal TCP ports from `1` through `65535`; port `0` is
+rejected because Stardust does not report an OS-assigned ephemeral port.
+
 Stardust has no API authentication or TLS, so it only accepts numeric loopback
 listeners (`127.0.0.1` or `[::1]`). Wildcard addresses, hostnames (including
 `localhost`), and non-loopback IP addresses are rejected at startup with an

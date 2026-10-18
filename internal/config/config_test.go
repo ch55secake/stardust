@@ -13,6 +13,8 @@ func TestValidateListenAddressPolicy(t *testing.T) {
 		wantMessage string
 	}{
 		{name: "default IPv4 loopback", address: DefaultListenAddress, wantValid: true},
+		{name: "minimum port", address: "127.0.0.1:1", wantValid: true},
+		{name: "maximum port", address: "127.0.0.1:65535", wantValid: true},
 		{name: "IPv6 loopback", address: "[::1]:8787", wantValid: true},
 		{name: "wildcard IPv4", address: "0.0.0.0:8787", wantMessage: "no authentication or TLS"},
 		{name: "wildcard IPv6", address: "[::]:8787", wantMessage: "no authentication or TLS"},
@@ -20,6 +22,10 @@ func TestValidateListenAddressPolicy(t *testing.T) {
 		{name: "localhost hostname", address: "localhost:8787", wantMessage: "numeric loopback"},
 		{name: "empty host wildcard", address: ":8787", wantMessage: "no authentication or TLS"},
 		{name: "missing port", address: "127.0.0.1", wantMessage: "numeric loopback address and port"},
+		{name: "empty port", address: "127.0.0.1:", wantMessage: "numeric port from 1 to 65535"},
+		{name: "non-numeric port", address: "127.0.0.1:not-a-port", wantMessage: "numeric port from 1 to 65535"},
+		{name: "port zero is unsupported", address: "127.0.0.1:0", wantMessage: "numeric port from 1 to 65535"},
+		{name: "port above TCP range", address: "127.0.0.1:65536", wantMessage: "numeric port from 1 to 65535"},
 	}
 
 	for _, test := range tests {
