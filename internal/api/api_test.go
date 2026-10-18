@@ -42,6 +42,7 @@ func TestMetricsReturnsCompleteFixture(t *testing.T) {
 		},
 		CPU:    metrics.CPU{UsagePercent: 12.5, LogicalCores: 4},
 		Memory: metrics.Memory{UsedBytes: 1000, TotalBytes: 2000, UsedPercent: 50},
+		Swap:   metrics.Swap{TotalBytes: 1000, UsedBytes: 300, FreeBytes: 700, UsedPercent: 30},
 		Disk:   metrics.Disk{Path: "/", UsedBytes: 1000, TotalBytes: 2000, UsedPercent: 50},
 		Uptime: 86400,
 		Network: metrics.Network{
@@ -77,11 +78,43 @@ func TestMetricsReturnsCompleteFixture(t *testing.T) {
 	}
 }
 
+func TestMetricsIncludesZeroSwapWhenNoneIsConfigured(t *testing.T) {
+	handler := NewHandler(fixtureCollector{}, time.Second, testLogger())
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/metrics", nil)
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	var data map[string]json.RawMessage
+	if err := json.Unmarshal(response["data"], &data); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	encodedSwap, ok := data["swap"]
+	if !ok {
+		t.Fatal("response data is missing the swap object")
+	}
+	var got metrics.Swap
+	if err := json.Unmarshal(encodedSwap, &got); err != nil {
+		t.Fatalf("decode swap: %v", err)
+	}
+	if got != (metrics.Swap{}) {
+		t.Fatalf("swap = %+v, want zero values when swap is not configured", got)
+	}
+}
+
 func TestMetricsReturnsAvailableDataAndErrors(t *testing.T) {
 	want := metrics.Snapshot{
 		Hostname: "server-01",
 		Errors: []metrics.MetricError{
 			{Metric: "disk", Message: "permission denied"},
+			{Metric: "swap", Message: "swap metrics unavailable"},
 		},
 	}
 	handler := NewHandler(fixtureCollector{snapshot: want}, time.Second, testLogger())
@@ -100,7 +133,7 @@ func TestMetricsReturnsAvailableDataAndErrors(t *testing.T) {
 	if response.Data.Hostname != want.Hostname {
 		t.Fatalf("hostname = %q, want %q", response.Data.Hostname, want.Hostname)
 	}
-	if len(response.Data.Errors) != 1 || response.Data.Errors[0] != want.Errors[0] {
+	if !reflect.DeepEqual(response.Data.Errors, want.Errors) {
 		t.Fatalf("errors = %+v, want %+v", response.Data.Errors, want.Errors)
 	}
 }

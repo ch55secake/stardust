@@ -20,6 +20,7 @@ type Snapshot struct {
 	OS       OSInfo        `json:"os"`
 	CPU      CPU           `json:"cpu"`
 	Memory   Memory        `json:"memory"`
+	Swap     Swap          `json:"swap"`
 	Disk     Disk          `json:"disk"`
 	Uptime   uint64        `json:"uptime_seconds"`
 	Network  Network       `json:"network"`
@@ -49,6 +50,13 @@ type Memory struct {
 	UsedPercent float64 `json:"used_percent"`
 }
 
+type Swap struct {
+	TotalBytes  uint64  `json:"total_bytes"`
+	UsedBytes   uint64  `json:"used_bytes"`
+	FreeBytes   uint64  `json:"free_bytes"`
+	UsedPercent float64 `json:"used_percent"`
+}
+
 type Disk struct {
 	Path        string  `json:"path"`
 	UsedBytes   uint64  `json:"used_bytes"`
@@ -74,6 +82,7 @@ type collectorFunctions struct {
 	cpuPercent      func(context.Context) ([]float64, error)
 	logicalCores    func(context.Context) (int, error)
 	virtualMemory   func(context.Context) (*mem.VirtualMemoryStat, error)
+	swapMemory      func(context.Context) (*mem.SwapMemoryStat, error)
 	diskUsage       func(context.Context, string) (*disk.UsageStat, error)
 	networkCounters func(context.Context) ([]psnet.IOCountersStat, error)
 }
@@ -93,6 +102,7 @@ func NewCollector(timeout time.Duration, diskPath string) *Collector {
 			cpuPercent:    func(ctx context.Context) ([]float64, error) { return cpu.PercentWithContext(ctx, 0, false) },
 			logicalCores:  func(ctx context.Context) (int, error) { return cpu.CountsWithContext(ctx, true) },
 			virtualMemory: mem.VirtualMemoryWithContext,
+			swapMemory:    mem.SwapMemoryWithContext,
 			diskUsage:     disk.UsageWithContext,
 			networkCounters: func(ctx context.Context) ([]psnet.IOCountersStat, error) {
 				return psnet.IOCountersWithContext(ctx, false)
@@ -160,6 +170,21 @@ func (c *Collector) Collect(ctx context.Context) (Snapshot, error) {
 			UsedBytes:   memory.Used,
 			TotalBytes:  memory.Total,
 			UsedPercent: memory.UsedPercent,
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return snapshot, err
+	}
+
+	swap, err := c.functions.swapMemory(ctx)
+	if err != nil {
+		addError("swap", err)
+	} else {
+		snapshot.Swap = Swap{
+			TotalBytes:  swap.Total,
+			UsedBytes:   swap.Used,
+			FreeBytes:   swap.Free,
+			UsedPercent: swap.UsedPercent,
 		}
 	}
 	if err := ctx.Err(); err != nil {

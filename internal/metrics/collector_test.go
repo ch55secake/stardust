@@ -32,6 +32,9 @@ func fixtureCollector(timeout time.Duration, diskPath string) *Collector {
 		virtualMemory: func(context.Context) (*mem.VirtualMemoryStat, error) {
 			return &mem.VirtualMemoryStat{Used: 1000, Total: 2000, UsedPercent: 50}, nil
 		},
+		swapMemory: func(context.Context) (*mem.SwapMemoryStat, error) {
+			return &mem.SwapMemoryStat{Total: 1000, Used: 300, Free: 700, UsedPercent: 30}, nil
+		},
 		diskUsage: func(_ context.Context, path string) (*disk.UsageStat, error) {
 			return &disk.UsageStat{Path: path, Used: 100, Total: 1000, UsedPercent: 10}, nil
 		},
@@ -59,6 +62,9 @@ func TestCollectorBuildsSnapshotAndAggregatesNetworkCounters(t *testing.T) {
 	if snapshot.Memory != (Memory{UsedBytes: 1000, TotalBytes: 2000, UsedPercent: 50}) {
 		t.Fatalf("memory = %+v, want fixture memory", snapshot.Memory)
 	}
+	if snapshot.Swap != (Swap{TotalBytes: 1000, UsedBytes: 300, FreeBytes: 700, UsedPercent: 30}) {
+		t.Fatalf("swap = %+v, want fixture swap", snapshot.Swap)
+	}
 	if snapshot.Disk != (Disk{Path: "/fixture", UsedBytes: 100, TotalBytes: 1000, UsedPercent: 10}) {
 		t.Fatalf("disk = %+v, want fixture disk", snapshot.Disk)
 	}
@@ -68,6 +74,42 @@ func TestCollectorBuildsSnapshotAndAggregatesNetworkCounters(t *testing.T) {
 	}
 	if len(snapshot.Errors) != 0 {
 		t.Fatalf("errors = %+v, want none", snapshot.Errors)
+	}
+}
+
+func TestCollectorHandlesHostWithoutSwap(t *testing.T) {
+	collector := fixtureCollector(time.Second, "/fixture")
+	collector.functions.swapMemory = func(context.Context) (*mem.SwapMemoryStat, error) {
+		return &mem.SwapMemoryStat{}, nil
+	}
+
+	snapshot, err := collector.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if snapshot.Swap != (Swap{}) {
+		t.Fatalf("swap = %+v, want zero values when swap is not configured", snapshot.Swap)
+	}
+	if len(snapshot.Errors) != 0 {
+		t.Fatalf("errors = %+v, want none for a host without swap", snapshot.Errors)
+	}
+}
+
+func TestCollectorReportsSwapMetricError(t *testing.T) {
+	collector := fixtureCollector(time.Second, "/fixture")
+	collector.functions.swapMemory = func(context.Context) (*mem.SwapMemoryStat, error) {
+		return nil, errors.New("swap metrics unavailable")
+	}
+
+	snapshot, err := collector.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if snapshot.Swap != (Swap{}) {
+		t.Fatalf("swap = %+v, want zero values when unavailable", snapshot.Swap)
+	}
+	if len(snapshot.Errors) != 1 || snapshot.Errors[0] != (MetricError{Metric: "swap", Message: "swap metrics unavailable"}) {
+		t.Fatalf("errors = %+v, want a swap metric error", snapshot.Errors)
 	}
 }
 
