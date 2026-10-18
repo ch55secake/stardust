@@ -10,6 +10,7 @@ import (
 
 	"github.com/ch55secake/stardust/internal/agent"
 	"github.com/ch55secake/stardust/internal/config"
+	"github.com/ch55secake/stardust/internal/services"
 )
 
 var version = "dev"
@@ -17,6 +18,7 @@ var version = "dev"
 func main() {
 	cfg := config.Default()
 	showVersion := flag.Bool("version", false, "print the Stardust version")
+	servicePolicyFile := flag.String("service-policy-file", "", "private JSON file containing service read token and exact unit allowlist (disabled by default)")
 	flag.StringVar(&cfg.ListenAddress, "listen", cfg.ListenAddress, "TCP listen address")
 	flag.DurationVar(&cfg.CollectionTimeout, "collection-timeout", cfg.CollectionTimeout, "maximum time allowed for metric collection")
 	flag.DurationVar(&cfg.RequestTimeout, "request-timeout", cfg.RequestTimeout, "maximum time allowed for an HTTP request")
@@ -33,6 +35,14 @@ func main() {
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if *servicePolicyFile != "" {
+		policy, err := services.LoadPolicy(*servicePolicyFile)
+		if err != nil {
+			logger.Error("invalid service policy", "error", err)
+			os.Exit(2)
+		}
+		cfg.ServicePolicy = policy
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

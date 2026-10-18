@@ -11,6 +11,7 @@ import (
 	"github.com/ch55secake/stardust/internal/api"
 	"github.com/ch55secake/stardust/internal/config"
 	"github.com/ch55secake/stardust/internal/metrics"
+	"github.com/ch55secake/stardust/internal/services"
 )
 
 type Server struct {
@@ -26,7 +27,7 @@ func NewServer(cfg config.Config, logger *slog.Logger) *Server {
 	return &Server{
 		httpServer: &http.Server{
 			Addr:              cfg.ListenAddress,
-			Handler:           api.NewHandler(collector, cfg.RequestTimeout, logger),
+			Handler:           api.NewHandler(collector, cfg.RequestTimeout, logger, api.WithServices(cfg.ServicePolicy, services.NewSystemd())),
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       cfg.RequestTimeout,
 			WriteTimeout:      cfg.RequestTimeout,
