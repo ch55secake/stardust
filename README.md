@@ -31,9 +31,9 @@ The installer detects `amd64` or `arm64` and verifies the archive against the
 published SHA-256 checksum. On Linux, it installs the binary, creates the
 unprivileged `stardust` account, and enables and starts the hardened systemd
 service. On macOS, it installs the binary under `/usr/local/bin` and starts a
-LaunchDaemon as the account that invoked `sudo`. This works without an active
-GUI login session. To install only the binary into a custom directory on either
-platform, use:
+LaunchDaemon as the dedicated `_stardust` account, not the invoking user. This
+works without an active GUI login session. To install only the binary into a
+custom directory on either platform, use:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | bash -s -- --no-service --install-dir "$HOME/.local/bin"
@@ -261,10 +261,23 @@ ssh -N -L 8787:127.0.0.1:8787 user@server
 
 ## macOS LaunchDaemon
 
-The macOS installer creates `/Library/LaunchDaemons/com.ch55secake.stardust.plist`
-and runs Stardust as the user who invoked `sudo` (not as root). The service
-starts at boot and launchd restarts it if it exits unsuccessfully. Logs are
-written to `/Library/Logs/Stardust/`.
+Installing the macOS LaunchDaemon requires `sudo`, but the service does not run
+as root or as the invoking administrator. The installer creates (or safely
+reuses) a dedicated hidden `_stardust` account and private `_stardust` group,
+with a disabled login, no personal home directory, and no supplementary group
+memberships configured on the account. It assigns unused system-range IDs and
+fails rather than changing an account or ID that conflicts with existing users
+or groups.
+
+The executable and `/Library/LaunchDaemons/com.ch55secake.stardust.plist` are
+installed as root-owned files. Stardust's log directory is owned by `_stardust`
+and restricted to that account and group. Upgrades reuse the account without
+removing it or its data; `--no-service` installs only the binary and does not
+create or modify the service account. Resolve unsafe pre-existing `_stardust`
+accounts manually. The service starts at boot and launchd restarts it if it exits
+unsuccessfully. Logs are written to `/Library/Logs/Stardust/`. Removing the
+LaunchDaemon or binary does not remove the account or logs; inspect and remove
+those separately only when they are no longer needed.
 
 Inspect or stop the service with:
 

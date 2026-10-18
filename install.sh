@@ -19,7 +19,7 @@ Options:
   -h, --help         Show this help
 
 The install directory can also be set with STARDUST_INSTALL_DIR. Service installs
-require root; the macOS LaunchDaemon runs as the invoking user.
+require root; the macOS LaunchDaemon runs as the dedicated _stardust account.
 EOF
 }
 
@@ -68,6 +68,173 @@ ensure_linux_service_account() {
 	for supplementary_gid in $supplementary_gids; do
 		if [[ ! "$supplementary_gid" =~ ^[0-9]+$ || "$supplementary_gid" != "$group_gid" ]]; then
 			fail "existing stardust account is unsafe; it must not have supplementary groups"
+		fi
+	done
+}
+
+macos_id_in_service_range() {
+	[[ "$1" =~ ^[0-9]+$ ]] || return 1
+	((10#$1 >= 400 && 10#$1 <= 499))
+}
+
+macos_id_used_by_other() {
+	local records="$1" identifier="$2" allowed_name="$3"
+	awk -v identifier="$identifier" -v allowed_name="$allowed_name" \
+		'$2 == identifier && $1 != allowed_name { used = 1 } END { exit !used }' <<<"$records"
+}
+
+macos_choose_service_id() {
+	local records="$1" candidate
+	for candidate in {400..499}; do
+		if ! awk -v identifier="$candidate" \
+			'$2 == identifier { used = 1 } END { exit used ? 0 : 1 }' <<<"$records"; then
+			printf '%s' "$candidate"
+			return 0
+		fi
+	done
+	return 1
+}
+
+macos_dscl_attribute() {
+	local record="$1" attribute="$2" output value
+	output="$(dscl . -read "$record" "$attribute" 2>/dev/null)" || return 1
+	value="$(awk -v attribute="${attribute}:" \
+		'$1 == attribute { $1 = ""; sub(/^[[:space:]]+/, ""); print; exit }' <<<"$output")"
+	[[ -n "$value" ]] || return 1
+	printf '%s' "$value"
+}
+
+macos_verify_no_supplementary_groups() {
+	local user="$1" primary_group="$2" generated_uid="$3" group_uuid="$4"
+	local attribute value values membership_groups membership_group
+	for attribute in GroupMembership GroupMembers NestedGroups; do
+		case "$attribute" in
+			GroupMembership) values="$user" ;;
+			GroupMembers) values="$generated_uid $group_uuid" ;;
+			NestedGroups) values="$group_uuid" ;;
+		esac
+		for value in $values; do
+			membership_groups="$(dscl . -search /Groups "$attribute" "$value" | \
+				awk -F '\t' -v expected="$attribute = (" '$3 == expected { print $1 }')" || \
+				fail "could not inspect supplementary groups for _stardust"
+			for membership_group in $membership_groups; do
+				[[ "$membership_group" == "$primary_group" ]] || \
+					fail "existing _stardust account has supplementary group membership in ${membership_group}"
+			done
+		done
+	done
+}
+
+ensure_macos_service_account() {
+	local user_record group_record users groups user_exists=false group_exists=false
+	local user_uid user_gid group_gid user_shell user_home user_auth user_uuid group_uuid group_details group_members group_uuid_members group_nested_members
+	local member
+	local user=_stardust group=_stardust
+	user_record="/Users/${user}"
+	group_record="/Groups/${group}"
+
+	users="$(dscl . -list /Users UniqueID)" || fail "could not inspect macOS user IDs"
+	groups="$(dscl . -list /Groups PrimaryGroupID)" || fail "could not inspect macOS group IDs"
+	if ! awk 'NF != 2 || $2 !~ /^[0-9]+$/ { invalid = 1 } END { exit invalid || NR == 0 }' <<<"$users"; then
+		fail "could not safely parse macOS user IDs"
+	fi
+	if ! awk 'NF != 2 || $2 !~ /^[0-9]+$/ { invalid = 1 } END { exit invalid || NR == 0 }' <<<"$groups"; then
+		fail "could not safely parse macOS group IDs"
+	fi
+
+	if dscl . -read "$user_record" >/dev/null 2>&1; then user_exists=true; fi
+	if dscl . -read "$group_record" >/dev/null 2>&1; then group_exists=true; fi
+	if [[ "$user_exists" == true && "$group_exists" != true ]]; then
+		fail "existing _stardust user has no matching service group; resolve the account conflict manually"
+	fi
+
+	if [[ "$group_exists" == true ]]; then
+		group_gid="$(macos_dscl_attribute "$group_record" PrimaryGroupID)" || fail "existing _stardust group has no valid primary group ID"
+		group_uuid="$(macos_dscl_attribute "$group_record" GeneratedUID)" || fail "existing _stardust group has no generated UUID"
+		macos_id_in_service_range "$group_gid" || fail "existing _stardust group is unsafe; its ID must be between 400 and 499"
+		[[ "$group_uuid" =~ ^[[:xdigit:]]{8}-([[:xdigit:]]{4}-){3}[[:xdigit:]]{12}$ ]] || fail "existing _stardust group has an invalid generated UUID"
+		if macos_id_used_by_other "$groups" "$group_gid" "$group"; then
+			fail "existing _stardust group ID is already assigned to another group"
+		fi
+		group_details="$(dscl . -read "$group_record")" || fail "could not inspect the existing _stardust group"
+		group_members="$(awk -F': ' '$1 == "GroupMembership" { print $2 }' <<<"$group_details")"
+		for member in $group_members; do
+			[[ "$member" == "$user" ]] || fail "existing _stardust group contains other users"
+		done
+		group_nested_members="$(awk -F': ' '$1 == "NestedGroups" { print $2 }' <<<"$group_details")"
+		[[ -z "$group_nested_members" ]] || fail "existing _stardust group must not contain nested groups"
+	else
+		group_gid="$(macos_choose_service_id "$groups")" || fail "no unused macOS system group ID is available between 400 and 499"
+		group_uuid="$(uuidgen)" || fail "could not generate a UUID for the _stardust service group"
+		[[ "$group_uuid" =~ ^[[:xdigit:]]{8}-([[:xdigit:]]{4}-){3}[[:xdigit:]]{12}$ ]] || fail "uuidgen returned an invalid UUID for the _stardust service group"
+	fi
+
+	if [[ "$user_exists" == true ]]; then
+		user_uid="$(macos_dscl_attribute "$user_record" UniqueID)" || fail "existing _stardust user has no valid user ID"
+		user_gid="$(macos_dscl_attribute "$user_record" PrimaryGroupID)" || fail "existing _stardust user has no primary group"
+		user_shell="$(macos_dscl_attribute "$user_record" UserShell)" || fail "existing _stardust user has no login shell setting"
+		user_home="$(macos_dscl_attribute "$user_record" NFSHomeDirectory)" || fail "existing _stardust user has no home setting"
+		user_auth="$(macos_dscl_attribute "$user_record" AuthenticationAuthority)" || fail "existing _stardust user authentication is not disabled"
+		user_uuid="$(macos_dscl_attribute "$user_record" GeneratedUID)" || fail "existing _stardust user has no generated UUID"
+		macos_id_in_service_range "$user_uid" || fail "existing _stardust user is unsafe; its ID must be between 400 and 499"
+		[[ "$user_gid" == "$group_gid" ]] || fail "existing _stardust user must use the _stardust primary group"
+		if macos_id_used_by_other "$users" "$user_uid" "$user"; then
+			fail "existing _stardust user ID is already assigned to another user"
+		fi
+		[[ "$user_shell" == /usr/bin/false ]] || fail "existing _stardust user must have a non-login shell"
+		[[ "$user_home" == /var/empty ]] || fail "existing _stardust user must not have a personal home directory"
+		[[ "$user_auth" == ';DisabledUser;' ]] || fail "existing _stardust user authentication must be disabled"
+		[[ "$user_uuid" =~ ^[[:xdigit:]]{8}-([[:xdigit:]]{4}-){3}[[:xdigit:]]{12}$ ]] || fail "existing _stardust user has an invalid generated UUID"
+	else
+		user_uid="$(macos_choose_service_id "$users")" || fail "no unused macOS system user ID is available between 400 and 499"
+		user_uuid="$(uuidgen)" || fail "could not generate a UUID for the _stardust service user"
+		[[ "$user_uuid" =~ ^[[:xdigit:]]{8}-([[:xdigit:]]{4}-){3}[[:xdigit:]]{12}$ ]] || fail "uuidgen returned an invalid UUID for the _stardust service user"
+	fi
+	if [[ "$group_exists" == true ]]; then
+		group_details="$(dscl . -read "$group_record")" || fail "could not inspect the _stardust service group"
+		group_uuid_members="$(awk -F': ' '$1 == "GroupMembers" { print $2 }' <<<"$group_details")"
+		for member in $group_uuid_members; do
+			[[ "$member" == "$user_uuid" ]] || fail "existing _stardust group contains other users"
+		done
+	fi
+
+	if [[ "$group_exists" != true ]]; then
+		dscl . -create "$group_record" || fail "could not create the _stardust service group"
+		dscl . -create "$group_record" PrimaryGroupID "$group_gid" || fail "could not set the _stardust service group ID"
+		dscl . -create "$group_record" GeneratedUID "$group_uuid" || fail "could not set the _stardust group UUID"
+		dscl . -create "$group_record" RealName "Stardust service group" || fail "could not name the _stardust service group"
+	fi
+	if [[ "$user_exists" != true ]]; then
+		dscl . -create "$user_record" || fail "could not create the _stardust service user"
+		dscl . -create "$user_record" UniqueID "$user_uid" || fail "could not set the _stardust user ID"
+		dscl . -create "$user_record" GeneratedUID "$user_uuid" || fail "could not set the _stardust user UUID"
+		dscl . -create "$user_record" PrimaryGroupID "$group_gid" || fail "could not set the _stardust primary group"
+		dscl . -create "$user_record" RealName "Stardust service account" || fail "could not name the _stardust service user"
+		dscl . -create "$user_record" UserShell /usr/bin/false || fail "could not disable the _stardust login shell"
+		dscl . -create "$user_record" NFSHomeDirectory /var/empty || fail "could not disable the _stardust home directory"
+		dscl . -create "$user_record" AuthenticationAuthority ';DisabledUser;' || fail "could not disable _stardust authentication"
+		dscl . -create "$user_record" IsHidden 1 || fail "could not hide the _stardust service account"
+	fi
+	macos_verify_no_supplementary_groups "$user" "$group" "$user_uuid" "$group_uuid"
+
+	launchd_user="$user"
+	launchd_group="$group"
+}
+
+prepare_macos_log_directory() {
+	local log_file link_count
+	mkdir -p "$launchd_log_dir" || fail "could not create the Stardust log directory"
+	[[ -d "$launchd_log_dir" && ! -L "$launchd_log_dir" ]] || fail "the Stardust log path must be a real directory, not a symlink"
+	chown "$launchd_user:$launchd_group" "$launchd_log_dir" || fail "could not assign the Stardust log directory to ${launchd_user}"
+	chmod 0750 "$launchd_log_dir" || fail "could not restrict the Stardust log directory"
+	for log_file in "${launchd_log_dir}/stdout.log" "${launchd_log_dir}/stderr.log"; do
+		[[ ! -L "$log_file" ]] || fail "Stardust log file ${log_file} must not be a symlink"
+		if [[ -e "$log_file" ]]; then
+			[[ -f "$log_file" ]] || fail "Stardust log path ${log_file} must be a regular file"
+			link_count="$(stat -f '%l' "$log_file")" || fail "could not inspect Stardust log file ${log_file}"
+			[[ "$link_count" == 1 ]] || fail "Stardust log file ${log_file} must not have hard links"
+			chown "$launchd_user:$launchd_group" "$log_file" || fail "could not assign Stardust log file ${log_file} to ${launchd_user}"
+			chmod 0640 "$log_file" || fail "could not restrict Stardust log file ${log_file}"
 		fi
 	done
 }
@@ -149,15 +316,12 @@ if [[ "$install_service" == true ]]; then
 		systemctl show-environment >/dev/null 2>&1 || fail "systemd is not running; pass --no-service to install only the binary"
 	else
 		(( EUID == 0 )) || fail "macOS LaunchDaemon installation requires sudo; rerun with sudo or pass --no-service"
-		[[ -n "${SUDO_USER:-}" && "$SUDO_USER" != root ]] || fail "run sudo from the account that should own Stardust; direct root installation is unsupported"
-		for tool in launchctl plutil id chown; do
+		for tool in launchctl plutil chown chmod dscl stat uuidgen; do
 			command -v "$tool" >/dev/null 2>&1 || fail "required command not found: $tool (or pass --no-service)"
 		done
 		launchd_domain=system
 		launchd_label=com.ch55secake.stardust
 		launchd_target="${launchd_domain}/${launchd_label}"
-		launchd_user="$SUDO_USER"
-		launchd_group="$(id -gn "$launchd_user")" || fail "could not find the primary group for ${launchd_user}"
 		launchd_log_dir=/Library/Logs/Stardust
 		launchctl print system >/dev/null 2>&1 || fail "launchd system domain is unavailable; pass --no-service to install only the binary"
 	fi
@@ -221,6 +385,7 @@ if [[ "$install_service" == true ]]; then
 		plist_path="${tmp_dir}/com.ch55secake.stardust.plist"
 		curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
 			--output "$plist_template" "https://raw.githubusercontent.com/${repo}/${release_tag}/deploy/launchd/${launchd_label}.plist" || fail "could not download the LaunchDaemon plist for ${release_tag}"
+		ensure_macos_service_account
 		cp "$plist_template" "$plist_path"
 		plutil -replace ProgramArguments -array "$plist_path" || fail "could not reset the LaunchDaemon arguments"
 		plutil -insert ProgramArguments -string "${install_dir}/stardust" -append "$plist_path" || fail "could not configure the LaunchDaemon binary path"
@@ -236,7 +401,11 @@ fi
 
 mkdir -p "$install_dir" || fail "cannot create ${install_dir}; choose a writable directory with --install-dir"
 staged_path="$(mktemp "${install_dir}/.stardust.XXXXXX")" || fail "cannot write to ${install_dir}; choose a writable directory with --install-dir"
-install -m 0755 "${tmp_dir}/stardust" "$staged_path" || fail "could not install the Stardust binary"
+if [[ "$goos" == darwin && "$install_service" == true ]]; then
+	install -o root -g wheel -m 0755 "${tmp_dir}/stardust" "$staged_path" || fail "could not set root ownership on the Stardust binary"
+else
+	install -m 0755 "${tmp_dir}/stardust" "$staged_path" || fail "could not install the Stardust binary"
+fi
 mv -f "$staged_path" "${install_dir}/stardust" || fail "could not move Stardust into ${install_dir}"
 staged_path=""
 
@@ -255,9 +424,7 @@ if [[ "$install_service" == true ]]; then
 		fi
 		printf 'Enabled and started systemd service stardust. Check it with: systemctl status stardust\n'
 	else
-		mkdir -p "$launchd_log_dir"
-		chown "$launchd_user:$launchd_group" "$launchd_log_dir" || fail "could not assign the Stardust log directory to ${launchd_user}"
-		chmod 0750 "$launchd_log_dir"
+		prepare_macos_log_directory
 		launchctl bootout "$launchd_target" >/dev/null 2>&1 || true
 		install -o root -g wheel -m 0644 "$plist_path" "/Library/LaunchDaemons/${launchd_label}.plist" || fail "could not install the LaunchDaemon plist"
 		launchctl enable "$launchd_target" || fail "could not enable the Stardust LaunchDaemon"
