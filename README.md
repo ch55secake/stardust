@@ -28,10 +28,11 @@ On macOS, use `sudo` so the installer can install and start a system LaunchDaemo
 curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | sudo bash
 ```
 
-The installer detects `amd64` or `arm64` and verifies the archive against the
-published SHA-256 checksum. On Linux, it installs the binary, creates the
-unprivileged `stardust` account, and enables and starts the hardened systemd
-service. On macOS, it installs the binary under `/usr/local/bin` and starts a
+The installer detects `amd64` or `arm64`, verifies the signed release checksum
+manifest, and checks the archive's SHA-256 digest. `openssl` is required on both
+Linux and macOS for signature verification. On Linux, it installs the binary,
+creates the unprivileged `stardust` account, and enables and starts the hardened
+systemd service. On macOS, it installs the binary under `/usr/local/bin` and starts a
 LaunchDaemon as the dedicated `_stardust` account, not the invoking user. This
 works without an active GUI login session. To install only the binary into a
 custom directory on either platform, use:
@@ -220,7 +221,7 @@ returns HTTP 503.
 
 ## systemd
 
-### Read-only systemd services and logs
+### systemd service inventory, logs, and restarts
 
 Optional authenticated service list/detail, separately authorized service logs,
 and opt-in service restarts are documented in
@@ -314,7 +315,10 @@ make build
 make lint
 ```
 
-The release workflow uses the shared GoReleaser workflow and publishes a GitHub
-release for every push to `main`. It automatically selects the next semantic
-version from published releases; manual dispatch follows the same path. Release
-archives are built for Linux and macOS on amd64 and arm64.
+The release workflow uses GoReleaser and publishes a GitHub release for every
+push to `main`. It automatically selects the next semantic version from
+published releases; manual dispatch follows the same path. Release archives are
+built for Linux and macOS on amd64 and arm64. GoReleaser signs `checksums.txt`
+with the dedicated `STARDUST_RELEASE_SIGNING_KEY` Actions secret. Installer
+trust roots, provisioning, and rotation are documented in
+[`docs/release-signing.md`](docs/release-signing.md).
