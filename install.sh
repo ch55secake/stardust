@@ -28,6 +28,50 @@ fail() {
 	exit 1
 }
 
+ensure_linux_service_account() {
+	local group_entry group_name group_password group_gid group_members
+	local passwd_entry user_name user_password user_uid user_gid user_gecos user_home user_shell
+	local supplementary_gids supplementary_gid
+
+	if ! getent group stardust >/dev/null; then
+		groupadd --system stardust || fail "could not create the stardust service group"
+	fi
+	group_entry="$(getent group stardust)" || fail "could not inspect the stardust service group"
+	IFS=: read -r group_name group_password group_gid group_members <<<"$group_entry"
+	if [[ "$group_name" != stardust || ! "$group_gid" =~ ^[0-9]+$ ]] || ((10#$group_gid == 0)); then
+		fail "existing stardust group is unsafe; it must have a nonzero numeric group ID"
+	fi
+	[[ -z "$group_members" || "$group_members" == stardust ]] || fail "existing stardust group is unsafe; it must not include other users"
+
+	if ! getent passwd stardust >/dev/null; then
+		useradd --system --gid stardust --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin stardust || fail "could not create the stardust service user"
+	fi
+	passwd_entry="$(getent passwd stardust)" || fail "could not inspect the stardust service account"
+	IFS=: read -r user_name user_password user_uid user_gid user_gecos user_home user_shell <<<"$passwd_entry"
+	if [[ "$user_name" != stardust || ! "$user_uid" =~ ^[0-9]+$ ]] || ((10#$user_uid == 0)); then
+		fail "existing stardust account is unsafe; its user ID must be numeric and nonzero"
+	fi
+	if [[ ! "$user_gid" =~ ^[0-9]+$ || "$user_gid" != "$group_gid" ]]; then
+		fail "existing stardust account is unsafe; its primary group must be stardust"
+	fi
+	case "$user_shell" in
+		/usr/sbin/nologin|/sbin/nologin|/bin/false|/usr/bin/false) ;;
+		*) fail "existing stardust account is unsafe; it must have a non-login shell" ;;
+	esac
+	case "$user_home" in
+		""|/nonexistent|/dev/null) ;;
+		*) [[ ! -d "$user_home" ]] || fail "existing stardust account is unsafe; its home directory must not exist" ;;
+	esac
+
+	supplementary_gids="$(id -G stardust)" || fail "could not inspect stardust supplementary groups"
+	[[ -n "$supplementary_gids" ]] || fail "could not inspect stardust supplementary groups"
+	for supplementary_gid in $supplementary_gids; do
+		if [[ ! "$supplementary_gid" =~ ^[0-9]+$ || "$supplementary_gid" != "$group_gid" ]]; then
+			fail "existing stardust account is unsafe; it must not have supplementary groups"
+		fi
+	done
+}
+
 while (($#)); do
 	case "$1" in
 	--install-dir)
@@ -99,7 +143,7 @@ if [[ "$install_service" == true ]]; then
 			*) fail "the systemd unit uses /usr/local/bin; use --no-service for a custom install directory" ;;
 		esac
 		(( EUID == 0 )) || fail "systemd installation requires root; use sudo or pass --no-service"
-		for tool in systemctl systemd-analyze getent groupadd useradd; do
+		for tool in systemctl systemd-analyze getent groupadd useradd id; do
 			command -v "$tool" >/dev/null 2>&1 || fail "required command not found: $tool (or pass --no-service)"
 		done
 		systemctl show-environment >/dev/null 2>&1 || fail "systemd is not running; pass --no-service to install only the binary"
@@ -171,12 +215,7 @@ if [[ "$install_service" == true ]]; then
 		unit_path="${tmp_dir}/stardust.service"
 		curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
 			--output "$unit_path" "https://raw.githubusercontent.com/${repo}/${release_tag}/deploy/systemd/stardust.service" || fail "could not download the systemd unit for ${release_tag}"
-		if ! getent group stardust >/dev/null; then
-			groupadd --system stardust || fail "could not create the stardust service group"
-		fi
-		if ! getent passwd stardust >/dev/null; then
-			useradd --system --gid stardust --no-create-home --shell /usr/sbin/nologin stardust || fail "could not create the stardust service user"
-		fi
+		ensure_linux_service_account
 	else
 		plist_template="${tmp_dir}/com.ch55secake.stardust.template.plist"
 		plist_path="${tmp_dir}/com.ch55secake.stardust.plist"

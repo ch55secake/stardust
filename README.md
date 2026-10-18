@@ -198,6 +198,11 @@ machine with systemd, the deployment can be exercised with `make build` followed
 by `sudo bash deploy/systemd/test.sh`; the test installs, starts, restarts, and
 stops the service, then removes its unit file.
 
+The installer validates any existing `stardust` account before reusing it. It
+must be non-root, have no login shell or usable home directory, use the
+`stardust` primary group, and have no other group memberships. Resolve an unsafe
+existing account manually; the installer will not modify or delete it.
+
 Forward the loopback port to the Orbit workstation:
 
 ```sh
