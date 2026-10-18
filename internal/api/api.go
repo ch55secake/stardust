@@ -58,12 +58,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/api/v1/health":
 		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
 			h.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only GET is supported")
 			return
 		}
 		h.health(w)
 	case "/api/v1/metrics":
 		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
 			h.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only GET is supported")
 			return
 		}
