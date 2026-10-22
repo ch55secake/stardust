@@ -142,6 +142,68 @@ func TestServiceAuthorizationAndMethods(t *testing.T) {
 	}
 }
 
+func TestServiceDetailIncludesSafeDiagnosticsOnlyForAuthorizedRead(t *testing.T) {
+	inspector := &fakeInspector{supported: true, inspect: func(_ context.Context, name string) (services.Unit, error) {
+		return services.Unit{
+			Name: name, ID: name, LoadState: "loaded", ActiveState: "failed", SubState: "failed",
+			Diagnostics: &services.UnitDiagnostics{
+				Result:         "exit-code",
+				ExecMainCode:   int32Pointer(1),
+				ExecMainStatus: int32Pointer(23),
+				RestartCount:   uint64Pointer(3),
+			},
+		}, nil
+	}}
+	handler := serviceHandler(t, inspector, "worker.service")
+	listRecorder := serviceRequest(handler, http.MethodGet, "/api/v1/services", serviceToken)
+	if listRecorder.Code != http.StatusOK || strings.Contains(listRecorder.Body.String(), `"diagnostics"`) {
+		t.Fatalf("bulk inventory included per-invocation diagnostics: %d %s", listRecorder.Code, listRecorder.Body.String())
+	}
+	inspector.names = nil
+
+	recorder := serviceRequest(handler, http.MethodGet, "/api/v1/services/worker.service", serviceToken)
+	var response struct {
+		Data services.Unit `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusOK || response.Data.Diagnostics == nil ||
+		response.Data.Diagnostics.Result != "exit-code" ||
+		response.Data.Diagnostics.ExecMainCode == nil || *response.Data.Diagnostics.ExecMainCode != 1 ||
+		response.Data.Diagnostics.ExecMainStatus == nil || *response.Data.Diagnostics.ExecMainStatus != 23 ||
+		response.Data.Diagnostics.RestartCount == nil || *response.Data.Diagnostics.RestartCount != 3 {
+		t.Fatalf("authorized diagnostics missing: %d %s", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), serviceToken) || strings.Contains(recorder.Body.String(), "systemctl") {
+		t.Fatalf("response leaked credentials or command output: %s", recorder.Body.String())
+	}
+
+	if recorder = serviceRequest(handler, http.MethodGet, "/api/v1/services/hidden.service", serviceToken); recorder.Code != http.StatusForbidden {
+		t.Fatalf("unauthorized detail returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if !reflect.DeepEqual(inspector.names, []string{"worker.service"}) {
+		t.Fatalf("denied unit was queried: %v", inspector.names)
+	}
+	if recorder = serviceRequest(handler, http.MethodPost, "/api/v1/services/worker.service", serviceToken); recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("diagnostic route accepted mutation method: %d %s", recorder.Code, recorder.Body.String())
+	}
+	if !reflect.DeepEqual(inspector.names, []string{"worker.service"}) {
+		t.Fatalf("non-GET request queried systemd: %v", inspector.names)
+	}
+}
+
+func int32Pointer(value int32) *int32 { return &value }
+
+func uint64Pointer(value uint64) *uint64 { return &value }
+
+func TestServiceDetailOmitsUnavailableDiagnostics(t *testing.T) {
+	recorder := serviceRequest(serviceHandler(t, &fakeInspector{supported: true}, "worker.service"), http.MethodGet, "/api/v1/services/worker.service", serviceToken)
+	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), `"diagnostics"`) {
+		t.Fatalf("unavailable diagnostics were represented: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestServiceBearerSchemeIsCaseInsensitive(t *testing.T) {
 	handler := serviceHandler(t, &fakeInspector{supported: true}, "a.service")
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/services", nil)

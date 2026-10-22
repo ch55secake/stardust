@@ -154,6 +154,9 @@ func (h *Handler) serviceRoute(w http.ResponseWriter, r *http.Request) bool {
 			return true
 		}
 		unit.RestartAllowed = h.serviceUnitRestartAllowed(name)
+		// Detailed process failure history is returned only for explicit unit
+		// lookups, not bulk inventory pages.
+		unit.Diagnostics = nil
 		page.Units = append(page.Units, unit)
 		if len(page.Units) == query.limit {
 			for _, remaining := range names[index+1:] {
