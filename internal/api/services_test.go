@@ -301,6 +301,139 @@ func TestRestartEndpointUnsupportedHostFailsClosed(t *testing.T) {
 	}
 }
 
+func TestServiceInventoryExposesRestartAllowlistSubset(t *testing.T) {
+	inspector := &fakeInspector{supported: true, inspect: func(_ context.Context, name string) (services.Unit, error) {
+		return services.Unit{Name: name, ID: name, LoadState: "loaded", ActiveState: "active", SubState: "running", RestartAllowed: true}, nil
+	}}
+	handler, _ := restartServiceHandler(t, inspector, &fakeRestarter{supported: true})
+	recorder := serviceRequest(handler, http.MethodGet, "/api/v1/services", serviceToken)
+	var response struct {
+		Data ServicePage `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusOK || len(response.Data.Units) != 2 {
+		t.Fatalf("service inventory unavailable: %d %s", recorder.Code, recorder.Body.String())
+	}
+	if response.Data.Units[0].Name != "a.service" || !response.Data.Units[0].RestartAllowed || response.Data.Units[1].Name != "b.service" || response.Data.Units[1].RestartAllowed {
+		t.Fatalf("restart allowlist was not represented per unit: %+v", response.Data.Units)
+	}
+	for _, test := range []struct {
+		unit string
+		want bool
+	}{{"a.service", true}, {"b.service", false}} {
+		recorder = serviceRequest(handler, http.MethodGet, "/api/v1/services/"+test.unit, serviceToken)
+		var detail struct {
+			Data services.Unit `json:"data"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &detail); err != nil {
+			t.Fatal(err)
+		}
+		if recorder.Code != http.StatusOK || detail.Data.RestartAllowed != test.want {
+			t.Fatalf("detail %s restart_allowed=%v, want %v: %s", test.unit, detail.Data.RestartAllowed, test.want, recorder.Body.String())
+		}
+		if !test.want && strings.Contains(recorder.Body.String(), `"restart_allowed"`) {
+			t.Fatalf("read-only detail should omit restart_allowed: %s", recorder.Body.String())
+		}
+	}
+}
+
+func TestServiceInventoryRestartAuthorizationUsesConfiguredAlias(t *testing.T) {
+	policy, err := services.NewPolicyWithRestart(serviceToken,
+		[]string{"read-only.service", "web-alias.service", "web.service"}, restartToken, []string{"web-alias.service"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspector := &fakeInspector{supported: true, inspect: func(_ context.Context, name string) (services.Unit, error) {
+		canonical := name
+		if name == "web-alias.service" {
+			canonical = "web.service"
+		}
+		return services.Unit{Name: name, ID: canonical, LoadState: "loaded", ActiveState: "active", SubState: "running"}, nil
+	}}
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := services.NewRestartManager(filepath.Join(directory, "operations.json"), policy, &fakeRestarter{supported: true}, inspector, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	handler := NewHandler(fixtureCollector{}, time.Second, testLogger(), WithServices(policy, inspector, manager))
+
+	recorder := serviceRequest(handler, http.MethodGet, "/api/v1/services", serviceToken)
+	var response struct {
+		Data ServicePage `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	allowed := make(map[string]services.Unit)
+	for _, unit := range response.Data.Units {
+		allowed[unit.Name] = unit
+	}
+	if recorder.Code != http.StatusOK || !allowed["web-alias.service"].RestartAllowed || allowed["web.service"].RestartAllowed || allowed["web-alias.service"].ID != allowed["web.service"].ID {
+		t.Fatalf("authorization did not follow exact configured alias rather than canonical ID: %s", recorder.Body.String())
+	}
+	recorder = serviceRequest(handler, http.MethodGet, "/api/v1/services/web-alias.service", serviceToken)
+	var detail struct {
+		Data services.Unit `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusOK || detail.Data.ID != "web.service" || !detail.Data.RestartAllowed {
+		t.Fatalf("alias detail lost its configured restart permission: %d %s", recorder.Code, recorder.Body.String())
+	}
+	recorder = serviceRequest(handler, http.MethodGet, "/api/v1/services/web.service", serviceToken)
+	detail = struct {
+		Data services.Unit `json:"data"`
+	}{}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusOK || detail.Data.RestartAllowed || strings.Contains(recorder.Body.String(), `"restart_allowed"`) {
+		t.Fatalf("canonical ID inherited the alias's restart permission: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestServiceInventoryOmitsRestartFlagWhenCapabilityIsDisabled(t *testing.T) {
+	inspector := &fakeInspector{supported: true, inspect: func(_ context.Context, name string) (services.Unit, error) {
+		return services.Unit{Name: name, ID: name, RestartAllowed: true}, nil
+	}}
+	for _, test := range []struct {
+		name   string
+		policy *services.Policy
+	}{
+		{name: "no restart policy", policy: func() *services.Policy {
+			policy, err := services.NewPolicy(serviceToken, []string{"a.service"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return policy
+		}()},
+		{name: "operation manager unavailable", policy: func() *services.Policy {
+			policy, err := services.NewPolicyWithRestart(serviceToken, []string{"a.service"}, restartToken, []string{"a.service"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return policy
+		}()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler := NewHandler(fixtureCollector{}, time.Second, testLogger(), WithServices(test.policy, inspector))
+			for _, path := range []string{"/api/v1/services", "/api/v1/services/a.service"} {
+				recorder := serviceRequest(handler, http.MethodGet, path, serviceToken)
+				if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), `"restart_allowed"`) {
+					t.Fatalf("disabled restart capability was advertised at %s: %d %s", path, recorder.Code, recorder.Body.String())
+				}
+			}
+		})
+	}
+}
+
 func TestServicePaginationFilteringAndLiveDetails(t *testing.T) {
 	inspector := &fakeInspector{supported: true}
 	handler := serviceHandler(t, inspector, "z.service", "worker@blue.service", "a.service")

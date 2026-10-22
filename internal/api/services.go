@@ -68,7 +68,7 @@ func (h *Handler) serviceRoute(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	if capabilities {
-		restartEnabled := h.servicePolicy != nil && h.servicePolicy.RestartEnabled() && h.restartManager != nil
+		restartEnabled := h.serviceRestartEnabled()
 		restartAuthentication := ""
 		if restartEnabled {
 			restartAuthentication = "bearer"
@@ -118,6 +118,7 @@ func (h *Handler) serviceRoute(w http.ResponseWriter, r *http.Request) bool {
 			h.serviceError(w, err)
 			return true
 		}
+		unit.RestartAllowed = h.serviceUnitRestartAllowed(name)
 		h.writeJSON(w, http.StatusOK, struct {
 			APIVersion string        `json:"api_version"`
 			Timestamp  time.Time     `json:"timestamp"`
@@ -152,6 +153,7 @@ func (h *Handler) serviceRoute(w http.ResponseWriter, r *http.Request) bool {
 			h.serviceError(w, inspectErr)
 			return true
 		}
+		unit.RestartAllowed = h.serviceUnitRestartAllowed(name)
 		page.Units = append(page.Units, unit)
 		if len(page.Units) == query.limit {
 			for _, remaining := range names[index+1:] {
@@ -169,6 +171,15 @@ func (h *Handler) serviceRoute(w http.ResponseWriter, r *http.Request) bool {
 		Data       ServicePage `json:"data"`
 	}{APIVersion: Version, Timestamp: time.Now().UTC(), Data: page})
 	return true
+}
+
+func (h *Handler) serviceRestartEnabled() bool {
+	return h.servicePolicy != nil && h.servicePolicy.RestartEnabled() &&
+		h.serviceInspector != nil && h.serviceInspector.Supported() && h.restartManager != nil
+}
+
+func (h *Handler) serviceUnitRestartAllowed(name string) bool {
+	return h.serviceRestartEnabled() && h.servicePolicy.AllowsRestart(name)
 }
 
 func (h *Handler) serviceRestartRoute(w http.ResponseWriter, r *http.Request, name string) {

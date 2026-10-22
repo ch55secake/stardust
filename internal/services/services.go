@@ -48,6 +48,8 @@ type Unit struct {
 	UnitFileState string           `json:"unit_file_state"`
 	MainPID       uint32           `json:"main_pid"`
 	MainProcess   *ProcessIdentity `json:"main_process,omitempty"`
+	// RestartAllowed is an informational API preflight; the restart endpoint remains authoritative.
+	RestartAllowed bool `json:"restart_allowed,omitempty"`
 }
 
 type ProcessIdentity struct {
