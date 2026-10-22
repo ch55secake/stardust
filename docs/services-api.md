@@ -219,6 +219,15 @@ URL-encode unit names. `name` is the configured identity used for authorization;
 an alias authorizes metadata for its current target; administrators must control
 unit/alias definitions. No alias expansion grants additional API-visible names.
 
+When restart capability is active, a unit in either the list or detail response
+may include `"restart_allowed": true`. The field is omitted when the exact
+configured `name` is not in `restart_units`, or restart is disabled/unavailable.
+Alias checks use that configured name, not the canonical `id`. This is an
+informational client/UI preflight only: the separate restart credential,
+server-side allowlist, PolicyKit rule, and idempotency validation on the POST
+endpoint remain authoritative. This is the per-unit shape agreed with
+[Orbit #46](https://github.com/ch55secake/orbit/issues/46).
+
 `main_pid: 0` means there is no main process; it is a live PID, not a stable process
 handle. When `/proc` exposes the current process, `main_process` includes its
 kernel process name and effective numeric UID; it may be omitted if the process
