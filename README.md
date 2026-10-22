@@ -45,7 +45,7 @@ To install a specific release, add `--version vX.Y.Z` to either command.
 
 ## Build and run
 
-Requirements for building from source: Go 1.26 or newer.
+Requirements for building from source: Go 1.26.10 or newer.
 
 ```sh
 make build

@@ -1,6 +1,6 @@
 module github.com/ch55secake/stardust
 
-go 1.26.0
+go 1.26.10
 
 require github.com/shirou/gopsutil/v4 v4.26.9
 
