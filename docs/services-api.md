@@ -239,6 +239,31 @@ configured unit remains visible in lists with `load_state: "not-found"`,
 zero PID, and empty optional metadata. Direct detail lookup returns 404 instead.
 Other backend errors fail the page, never masquerading as an empty inventory.
 
+The detail response may include an optional `diagnostics` object (bulk list
+responses omit it) containing only systemd properties that are present and
+parseable:
+
+```json
+{
+  "diagnostics": {
+    "result": "exit-code",
+    "exec_main_code": 1,
+    "exec_main_status": 23,
+    "restart_count": 2
+  }
+}
+```
+
+`result` is systemd's last invocation result. `exec_main_code` and
+`exec_main_status` are the main command's wait result code and status (the status
+is an exit code or signal according to the code). `restart_count` is systemd's
+reported automatic-restart counter. Individual fields may be omitted on older
+systemd versions or when unavailable/invalid. Exit details can describe a prior
+invocation; the restart counter is not a durable audit record and its reset
+behavior follows systemd. None of these values is an application health check.
+They are read-only hints, never cause an operation, and a missing or malformed
+diagnostics property does not invalidate otherwise valid unit state.
+
 All service/capability responses use `Cache-Control: no-store`. Inventory, log,
 and capability routes are GET-only and return 405 with `Allow: GET` for other
 methods; restart routes accept only POST. Errors use the existing v1 envelope:

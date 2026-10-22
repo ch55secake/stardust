@@ -257,6 +257,97 @@ func TestSystemdInspection(t *testing.T) {
 	}
 }
 
+func TestSystemdInspectionParsesOptionalDiagnostics(t *testing.T) {
+	tests := []struct {
+		name, activeState, subState string
+		properties                  string
+		want                        *UnitDiagnostics
+	}{
+		{
+			name:        "failed invocation",
+			activeState: "failed",
+			subState:    "failed",
+			properties:  "Result=exit-code\nExecMainCode=1\nExecMainStatus=23\nNRestarts=2\n",
+			want: &UnitDiagnostics{
+				Result:         "exit-code",
+				ExecMainCode:   int32Pointer(1),
+				ExecMainStatus: int32Pointer(23),
+				RestartCount:   uint64Pointer(2),
+			},
+		},
+		{
+			name:        "active and zero values",
+			activeState: "active",
+			subState:    "running",
+			properties:  "Result=success\nExecMainCode=1\nExecMainStatus=0\nNRestarts=0\n",
+			want: &UnitDiagnostics{
+				Result:         "success",
+				ExecMainCode:   int32Pointer(1),
+				ExecMainStatus: int32Pointer(0),
+				RestartCount:   uint64Pointer(0),
+			},
+		},
+		{
+			name:        "never started with no properties",
+			activeState: "inactive",
+			subState:    "dead",
+			properties:  "",
+			want:        nil,
+		},
+		{
+			name:        "automatically restarted service",
+			activeState: "active",
+			subState:    "running",
+			properties:  "Result=success\nExecMainCode=1\nExecMainStatus=0\nNRestarts=3\n",
+			want: &UnitDiagnostics{
+				Result:         "success",
+				ExecMainCode:   int32Pointer(1),
+				ExecMainStatus: int32Pointer(0),
+				RestartCount:   uint64Pointer(3),
+			},
+		},
+		{
+			name:        "partial valid properties",
+			activeState: "failed",
+			subState:    "failed",
+			properties:  "Result=core-dump\nExecMainCode=-1\nExecMainStatus=2147483648\nNRestarts=3\n",
+			want: &UnitDiagnostics{
+				Result:       "core-dump",
+				RestartCount: uint64Pointer(3),
+			},
+		},
+		{
+			name:        "invalid result is not exposed",
+			activeState: "active",
+			subState:    "running",
+			properties:  "Result=\x1b[31msecret\nExecMainCode=bad\nExecMainStatus=bad\nNRestarts=-1\n",
+			want:        nil,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output := "Id=worker.service\nLoadState=loaded\nActiveState=" + test.activeState + "\nSubState=" + test.subState + "\nMainPID=0\n" + test.properties
+			inspector := &Systemd{supported: true, run: func(context.Context, string) ([]byte, error) {
+				return []byte(output), nil
+			}}
+			unit, err := inspector.Inspect(context.Background(), "worker.service")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(unit.Diagnostics, test.want) {
+				t.Fatalf("diagnostics = %#v, want %#v", unit.Diagnostics, test.want)
+			}
+			if unit.ActiveState != test.activeState || unit.SubState != test.subState {
+				t.Fatalf("diagnostics changed valid unit state: %+v", unit)
+			}
+		})
+	}
+}
+
+func int32Pointer(value int32) *int32 { return &value }
+
+func uint64Pointer(value uint64) *uint64 { return &value }
+
 func TestSystemdProcessIdentityTracksChangingPIDsAndIsBestEffort(t *testing.T) {
 	procRoot := t.TempDir()
 	writeProcessStatus(t, procRoot, "123", "Name:\tworker-old\nUid:\t1000\t1001\t1000\t1001\n")
@@ -346,7 +437,7 @@ func TestPermissionDenialClassificationDoesNotExposeStderr(t *testing.T) {
 
 func TestSystemctlCommandIsReadOnlyAndDoesNotUseShell(t *testing.T) {
 	command := systemctlCommand(context.Background(), "worker@blue.service")
-	want := []string{"/usr/bin/systemctl", "show", "--no-pager", "--property=Id,Description,LoadState,ActiveState,SubState,UnitFileState,MainPID", "--", "worker@blue.service"}
+	want := []string{"/usr/bin/systemctl", "show", "--no-pager", "--property=Id,Description,LoadState,ActiveState,SubState,UnitFileState,MainPID,Result,ExecMainCode,ExecMainStatus,NRestarts", "--", "worker@blue.service"}
 	if command.Path != "/usr/bin/systemctl" || !reflect.DeepEqual(command.Args, want) {
 		t.Fatalf("unsafe command: %+v", command.Args)
 	}

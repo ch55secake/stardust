@@ -49,7 +49,17 @@ type Unit struct {
 	MainPID       uint32           `json:"main_pid"`
 	MainProcess   *ProcessIdentity `json:"main_process,omitempty"`
 	// RestartAllowed is an informational API preflight; the restart endpoint remains authoritative.
-	RestartAllowed bool `json:"restart_allowed,omitempty"`
+	RestartAllowed bool             `json:"restart_allowed,omitempty"`
+	Diagnostics    *UnitDiagnostics `json:"diagnostics,omitempty"`
+}
+
+// UnitDiagnostics contains optional systemd invocation diagnostics. These are
+// operational hints, not an application health check.
+type UnitDiagnostics struct {
+	Result         string  `json:"result,omitempty"`
+	ExecMainCode   *int32  `json:"exec_main_code,omitempty"`
+	ExecMainStatus *int32  `json:"exec_main_status,omitempty"`
+	RestartCount   *uint64 `json:"restart_count,omitempty"`
 }
 
 type ProcessIdentity struct {

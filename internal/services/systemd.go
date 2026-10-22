@@ -93,11 +93,56 @@ func (s *Systemd) Inspect(ctx context.Context, name string) (Unit, error) {
 	if parseErr != nil || !ValidUnit(properties["Id"]) || properties["LoadState"] == "" || properties["ActiveState"] == "" || properties["SubState"] == "" {
 		return Unit{}, ErrUnavailable
 	}
-	unit := Unit{Name: name, ID: properties["Id"], Description: properties["Description"], LoadState: properties["LoadState"], ActiveState: properties["ActiveState"], SubState: properties["SubState"], UnitFileState: properties["UnitFileState"], MainPID: uint32(pid)}
+	unit := Unit{Name: name, ID: properties["Id"], Description: properties["Description"], LoadState: properties["LoadState"], ActiveState: properties["ActiveState"], SubState: properties["SubState"], UnitFileState: properties["UnitFileState"], MainPID: uint32(pid), Diagnostics: parseUnitDiagnostics(properties)}
 	if unit.MainPID > 0 {
 		unit.MainProcess = s.readProcessIdentity(unit.MainPID)
 	}
 	return unit, nil
+}
+
+func parseUnitDiagnostics(properties map[string]string) *UnitDiagnostics {
+	diagnostics := &UnitDiagnostics{}
+	hasDiagnostics := false
+
+	if result := properties["Result"]; safeSystemdResult(result) {
+		diagnostics.Result = result
+		hasDiagnostics = true
+	}
+	if code, err := strconv.ParseInt(properties["ExecMainCode"], 10, 32); err == nil && code >= 0 {
+		parsed := int32(code)
+		diagnostics.ExecMainCode = &parsed
+		hasDiagnostics = true
+	}
+	if status, err := strconv.ParseInt(properties["ExecMainStatus"], 10, 32); err == nil && status >= 0 {
+		parsed := int32(status)
+		diagnostics.ExecMainStatus = &parsed
+		hasDiagnostics = true
+	}
+	if count, err := strconv.ParseUint(properties["NRestarts"], 10, 64); err == nil {
+		diagnostics.RestartCount = &count
+		hasDiagnostics = true
+	}
+	if !hasDiagnostics {
+		return nil
+	}
+	return diagnostics
+}
+
+func safeSystemdResult(value string) bool {
+	if len(value) == 0 || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		switch {
+		case character >= 'a' && character <= 'z':
+		case character >= 'A' && character <= 'Z':
+		case character >= '0' && character <= '9':
+		case character == '_', character == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Systemd) readProcessIdentity(pid uint32) *ProcessIdentity {
@@ -188,7 +233,7 @@ func hasPermissionDenial(stderr string) bool {
 func systemctlCommand(ctx context.Context, name string) *exec.Cmd {
 	// No shell, PATH lookup, user-controlled options, inherited environment, or
 	// mutation verbs. -- prevents option injection.
-	command := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", "--no-pager", "--property=Id,Description,LoadState,ActiveState,SubState,UnitFileState,MainPID", "--", name)
+	command := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", "--no-pager", "--property=Id,Description,LoadState,ActiveState,SubState,UnitFileState,MainPID,Result,ExecMainCode,ExecMainStatus,NRestarts", "--", name)
 	command.Env = []string{"LANG=C", "LC_ALL=C", "SYSTEMD_COLORS=0"}
 	command.WaitDelay = time.Second
 	return command
