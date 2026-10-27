@@ -830,17 +830,16 @@ class InstallerRegressionTests(unittest.TestCase):
         self.assertNotIn("--service-policy-file", unit)
         self.assertFalse((self.root / "new-service-account" / "etc" / "stardust" / "services.json").exists())
 
-    def test_linux_service_inventory_opt_in_creates_private_allowlist_for_present_common_units(self):
+    def test_linux_service_inventory_default_creates_private_allowlist_for_present_common_units(self):
         unit_files = """\
 ssh.service enabled enabled
 cron.service disabled enabled
 nginx.service enabled enabled
 custom-agent.service enabled enabled
 """
-        case_name = "service-inventory-opt-in"
+        case_name = "service-inventory-default"
         result, install_dir, unit_path, _, _ = self._run_linux_service_installer(
             case_name,
-            extra_args=("--enable-service-inventory",),
             systemd_unit_files=unit_files,
         )
 
@@ -898,33 +897,33 @@ custom-agent.service enabled enabled
         systemctl_commands = (self.root / "systemctl.log").read_text(encoding="utf-8")
         self.assertFalse(any(command.startswith(("enable ", "start ")) for command in systemctl_commands.splitlines()))
 
-    def test_linux_service_inventory_fails_without_matching_preset_units(self):
+    def test_linux_service_inventory_skips_policy_when_no_preset_units_match(self):
         case_name = "service-inventory-no-matches"
         result, install_dir, _, _, _ = self._run_linux_service_installer(
             case_name,
             existing_binary=b"existing binary",
-            extra_args=("--enable-service-inventory",),
         )
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("none of the common default services are installed", result.stderr)
-        self.assertEqual((install_dir / "stardust").read_bytes(), b"existing binary")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("No common preset services are installed", result.stdout)
+        self.assertEqual((install_dir / "stardust").read_bytes(), self.assets[("linux", "amd64")][1])
         self.assertFalse((self.root / case_name / "etc" / "stardust" / "services.json").exists())
         systemctl_commands = (self.root / "systemctl.log").read_text(encoding="utf-8")
-        self.assertFalse(any(command.startswith(("enable ", "start ")) for command in systemctl_commands.splitlines()))
+        self.assertIn("start stardust.service", systemctl_commands)
 
-    def test_service_inventory_option_requires_linux_service_install(self):
-        result = subprocess.run(
-            ["bash", str(self.test_installer), "--enable-service-inventory", "--no-service"],
-            cwd=REPO_ROOT,
-            env=self._env(),
-            capture_output=True,
-            text=True,
-            check=False,
+    def test_linux_service_inventory_can_be_disabled(self):
+        case_name = "service-inventory-disabled"
+        result, _, unit_path, _, _ = self._run_linux_service_installer(
+            case_name,
+            extra_args=("--no-service-inventory",),
+            systemd_unit_files="ssh.service enabled enabled\n",
         )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("requires a Linux systemd service install", result.stderr)
-        self.assertFalse(self.curl_log.exists())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / case_name / "etc" / "stardust" / "services.json").exists())
+        self.assertNotIn("--service-policy-file", unit_path.read_text(encoding="utf-8"))
+        systemctl_commands = (self.root / "systemctl.log").read_text(encoding="utf-8")
+        self.assertNotIn("list-unit-files", systemctl_commands)
 
     def test_linux_service_install_accepts_a_safe_existing_account(self):
         result, _, _, state, account_log = self._run_linux_service_installer("safe-existing-account")

@@ -5,7 +5,7 @@ repo="ch55secake/stardust"
 install_dir="${STARDUST_INSTALL_DIR:-}"
 version=""
 install_service=true
-enable_service_inventory=false
+enable_service_inventory=true
 service_policy_dir=/etc/stardust
 service_policy_path="${service_policy_dir}/services.json"
 default_service_units=(
@@ -34,13 +34,13 @@ usage() {
 	cat <<'EOF'
 Install the latest Stardust release for Linux or macOS.
 
-Usage: install.sh [--install-dir DIR] [--version vX.Y.Z] [--no-service] [--enable-service-inventory]
+Usage: install.sh [--install-dir DIR] [--version vX.Y.Z] [--no-service] [--no-service-inventory]
 
 Options:
   --install-dir DIR  Install Stardust into DIR (default: /usr/local/bin)
   --version VERSION  Install a specific release (default: latest)
   --no-service       Install only the binary; do not create a service
-  --enable-service-inventory  Opt in to an authenticated allowlist of installed common Linux services
+  --no-service-inventory  Do not configure the default Linux service inventory
   -h, --help         Show this help
 
 The install directory can also be set with STARDUST_INSTALL_DIR. Service installs
@@ -99,11 +99,31 @@ ensure_linux_service_account() {
 
 prepare_linux_service_inventory() {
 	local unit_path="$1" unit_files candidate candidate_index token policy_tmp configured_unit directory_info policy_info expected_exec_start
+	local policy_exists=false
 	local service_inventory_requested=false
 	local -a selected_units=()
 
-	if [[ "$enable_service_inventory" != true && ! -e "$service_policy_path" && ! -L "$service_policy_path" ]]; then
+	if [[ "$enable_service_inventory" != true ]]; then
 		return
+	fi
+
+	if [[ -L "$service_policy_path" || ( -e "$service_policy_path" && ! -f "$service_policy_path" ) ]]; then
+		fail "service policy must be a regular file, not a symbolic link or special file"
+	fi
+	if [[ -e "$service_policy_path" ]]; then
+		policy_exists=true
+	else
+		unit_files="$(LC_ALL=C systemctl list-unit-files --type=service --no-legend --no-pager)" || \
+			fail "could not list installed systemd services for the default allowlist"
+		for candidate in "${default_service_units[@]}"; do
+			if awk -v target="$candidate" '$1 == target { found = 1 } END { exit !found }' <<<"$unit_files"; then
+				selected_units+=("$candidate")
+			fi
+		done
+		if ((${#selected_units[@]} == 0)); then
+			printf 'No common preset services are installed; service inventory remains disabled.\n'
+			return
+		fi
 	fi
 
 	if [[ -e "$service_policy_dir" || -L "$service_policy_dir" ]]; then
@@ -116,25 +136,11 @@ prepare_linux_service_inventory() {
 		chmod 0750 "$service_policy_dir" || fail "could not restrict the service policy directory"
 	fi
 
-	if [[ -L "$service_policy_path" || ( -e "$service_policy_path" && ! -f "$service_policy_path" ) ]]; then
-		fail "service policy must be a regular file, not a symbolic link or special file"
-	fi
-
-	if [[ -e "$service_policy_path" ]]; then
+	if [[ "$policy_exists" == true ]]; then
 		policy_info="$(stat -c '%U:%a' "$service_policy_path")" || fail "could not inspect the service policy file"
 		[[ "$policy_info" == stardust:400 || "$policy_info" == stardust:600 ]] || \
 			fail "existing service policy must be owned by stardust with mode 0400 or 0600"
 	else
-		[[ "$enable_service_inventory" == true ]] || fail "service policy file is missing"
-		unit_files="$(LC_ALL=C systemctl list-unit-files --type=service --no-legend --no-pager)" || \
-			fail "could not list installed systemd services for the default allowlist"
-		for candidate in "${default_service_units[@]}"; do
-			if awk -v target="$candidate" '$1 == target { found = 1 } END { exit !found }' <<<"$unit_files"; then
-				selected_units+=("$candidate")
-			fi
-		done
-		((${#selected_units[@]} > 0)) || fail "none of the common default services are installed; no service inventory policy was created"
-
 		token="$(openssl rand -hex 32)" || fail "could not generate a service inventory token"
 		[[ "$token" =~ ^[[:xdigit:]]{64}$ ]] || fail "generated service inventory token was invalid"
 		policy_tmp="${tmp_dir}/services.json"
@@ -360,8 +366,8 @@ while (($#)); do
 		install_service=false
 		shift
 		;;
-	--enable-service-inventory)
-		enable_service_inventory=true
+	--no-service-inventory)
+		enable_service_inventory=false
 		shift
 		;;
 	-h|--help)
@@ -393,10 +399,6 @@ Darwin)
 *) fail "only Linux and macOS are supported" ;;
 esac
 [[ -n "$install_dir" ]] || fail "install directory must not be empty"
-if [[ "$enable_service_inventory" == true && ( "$install_service" != true || "$service_manager" != systemd ) ]]; then
-	fail "--enable-service-inventory requires a Linux systemd service install"
-fi
-
 case "$(uname -m)" in
 x86_64|amd64) arch=amd64 ;;
 aarch64|arm64) arch=arm64 ;;
