@@ -5,6 +5,17 @@ repo="ch55secake/stardust"
 install_dir="${STARDUST_INSTALL_DIR:-}"
 version=""
 install_service=true
+enable_service_inventory=false
+service_policy_dir=/etc/stardust
+service_policy_path="${service_policy_dir}/services.json"
+default_service_units=(
+	sshd.service ssh.service
+	cron.service crond.service
+	systemd-resolved.service systemd-networkd.service NetworkManager.service
+	nginx.service apache2.service httpd.service
+	docker.service containerd.service
+	mariadb.service mysql.service postgresql.service
+)
 trusted_release_public_keys=(
 '-----BEGIN PUBLIC KEY-----
 MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAsE8IMKMvZ2rFpW9n/PYJ
@@ -23,12 +34,13 @@ usage() {
 	cat <<'EOF'
 Install the latest Stardust release for Linux or macOS.
 
-Usage: install.sh [--install-dir DIR] [--version vX.Y.Z] [--no-service]
+Usage: install.sh [--install-dir DIR] [--version vX.Y.Z] [--no-service] [--enable-service-inventory]
 
 Options:
   --install-dir DIR  Install Stardust into DIR (default: /usr/local/bin)
   --version VERSION  Install a specific release (default: latest)
   --no-service       Install only the binary; do not create a service
+  --enable-service-inventory  Opt in to an authenticated allowlist of installed common Linux services
   -h, --help         Show this help
 
 The install directory can also be set with STARDUST_INSTALL_DIR. Service installs
@@ -83,6 +95,86 @@ ensure_linux_service_account() {
 			fail "existing stardust account is unsafe; it must not have supplementary groups"
 		fi
 	done
+}
+
+prepare_linux_service_inventory() {
+	local unit_path="$1" unit_files candidate candidate_index token policy_tmp configured_unit directory_info policy_info expected_exec_start
+	local service_inventory_requested=false
+	local -a selected_units=()
+
+	if [[ "$enable_service_inventory" != true && ! -e "$service_policy_path" && ! -L "$service_policy_path" ]]; then
+		return
+	fi
+
+	if [[ -e "$service_policy_dir" || -L "$service_policy_dir" ]]; then
+		[[ -d "$service_policy_dir" && ! -L "$service_policy_dir" ]] || fail "service policy directory must be a real directory"
+		directory_info="$(stat -c '%U:%G:%a' "$service_policy_dir")" || fail "could not inspect the service policy directory"
+		[[ "$directory_info" == root:stardust:750 ]] || fail "existing service policy directory must be root:stardust mode 0750"
+	else
+		mkdir -p "$service_policy_dir" || fail "could not create the service policy directory"
+		chown root:stardust "$service_policy_dir" || fail "could not assign the service policy directory to root:stardust"
+		chmod 0750 "$service_policy_dir" || fail "could not restrict the service policy directory"
+	fi
+
+	if [[ -L "$service_policy_path" || ( -e "$service_policy_path" && ! -f "$service_policy_path" ) ]]; then
+		fail "service policy must be a regular file, not a symbolic link or special file"
+	fi
+
+	if [[ -e "$service_policy_path" ]]; then
+		policy_info="$(stat -c '%U:%a' "$service_policy_path")" || fail "could not inspect the service policy file"
+		[[ "$policy_info" == stardust:400 || "$policy_info" == stardust:600 ]] || \
+			fail "existing service policy must be owned by stardust with mode 0400 or 0600"
+	else
+		[[ "$enable_service_inventory" == true ]] || fail "service policy file is missing"
+		unit_files="$(LC_ALL=C systemctl list-unit-files --type=service --no-legend --no-pager)" || \
+			fail "could not list installed systemd services for the default allowlist"
+		for candidate in "${default_service_units[@]}"; do
+			if awk -v target="$candidate" '$1 == target { found = 1 } END { exit !found }' <<<"$unit_files"; then
+				selected_units+=("$candidate")
+			fi
+		done
+		((${#selected_units[@]} > 0)) || fail "none of the common default services are installed; no service inventory policy was created"
+
+		token="$(openssl rand -hex 32)" || fail "could not generate a service inventory token"
+		[[ "$token" =~ ^[[:xdigit:]]{64}$ ]] || fail "generated service inventory token was invalid"
+		policy_tmp="${tmp_dir}/services.json"
+		{
+			printf '{\n  "token": "%s",\n  "units": [\n' "$token"
+			for candidate_index in "${!selected_units[@]}"; do
+				if ((candidate_index + 1 < ${#selected_units[@]})); then
+					printf '    "%s",\n' "${selected_units[$candidate_index]}"
+				else
+					printf '    "%s"\n' "${selected_units[$candidate_index]}"
+				fi
+			done
+			printf '  ]\n}\n'
+		} > "$policy_tmp"
+		install -o stardust -g stardust -m 0400 "$policy_tmp" "$service_policy_path" || \
+			fail "could not create the private service inventory policy"
+		service_inventory_requested=true
+	fi
+
+	configured_unit="${tmp_dir}/stardust.service.with-service-inventory"
+	expected_exec_start="ExecStart=${install_dir}/stardust --listen 127.0.0.1:8787"
+	awk -v policy="$service_policy_path" -v expected_start="$expected_exec_start" '
+		/^\[Service\]$/ { in_service = 1; print; next }
+		/^\[/ { in_service = 0 }
+		in_service && /^ExecStart=/ {
+			if (found || $0 != expected_start) exit 1
+			print $0 " --service-policy-file=" policy
+			found = 1
+			next
+		}
+		{ print }
+		END { if (!found) exit 1 }
+	' "$unit_path" > "$configured_unit" || fail "could not safely add the service policy to the systemd unit"
+	mv "$configured_unit" "$unit_path" || fail "could not prepare the systemd service policy"
+	if [[ "$service_inventory_requested" == true ]]; then
+		printf 'Enabled authenticated service inventory for installed units: %s\n' "${selected_units[*]}"
+		printf 'The private read token is in %s; the installer does not print it.\n' "$service_policy_path"
+	else
+		printf 'Preserving and using the existing service inventory policy at %s\n' "$service_policy_path"
+	fi
 }
 
 macos_id_in_service_range() {
@@ -268,6 +360,10 @@ while (($#)); do
 		install_service=false
 		shift
 		;;
+	--enable-service-inventory)
+		enable_service_inventory=true
+		shift
+		;;
 	-h|--help)
 		usage
 		exit 0
@@ -297,6 +393,9 @@ Darwin)
 *) fail "only Linux and macOS are supported" ;;
 esac
 [[ -n "$install_dir" ]] || fail "install directory must not be empty"
+if [[ "$enable_service_inventory" == true && ( "$install_service" != true || "$service_manager" != systemd ) ]]; then
+	fail "--enable-service-inventory requires a Linux systemd service install"
+fi
 
 case "$(uname -m)" in
 x86_64|amd64) arch=amd64 ;;
@@ -323,7 +422,7 @@ if [[ "$install_service" == true ]]; then
 			*) fail "the systemd unit uses /usr/local/bin; use --no-service for a custom install directory" ;;
 		esac
 		(( EUID == 0 )) || fail "systemd installation requires root; use sudo or pass --no-service"
-		for tool in systemctl systemd-analyze getent groupadd useradd id; do
+		for tool in systemctl systemd-analyze getent groupadd useradd id stat; do
 			command -v "$tool" >/dev/null 2>&1 || fail "required command not found: $tool (or pass --no-service)"
 		done
 		systemctl show-environment >/dev/null 2>&1 || fail "systemd is not running; pass --no-service to install only the binary"
@@ -406,6 +505,7 @@ if [[ "$install_service" == true ]]; then
 		curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
 			--output "$unit_path" "https://raw.githubusercontent.com/${repo}/${release_tag}/deploy/systemd/stardust.service" || fail "could not download the systemd unit for ${release_tag}"
 		ensure_linux_service_account
+		prepare_linux_service_inventory "$unit_path"
 	else
 		plist_template="${tmp_dir}/com.ch55secake.stardust.template.plist"
 		plist_path="${tmp_dir}/com.ch55secake.stardust.plist"

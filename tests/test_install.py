@@ -198,6 +198,10 @@ elif tool in ("chown", "chmod"):
 elif tool == "stat":
     if args[:2] == ["-f", "%l"]:
         print(pathlib.Path(args[2]).stat().st_nlink)
+    elif args[:2] == ["-c", "%U:%G:%a"]:
+        print(os.environ.get("STARDUST_POLICY_DIR_STAT", "root:stardust:750"))
+    elif args[:2] == ["-c", "%U:%a"]:
+        print(os.environ.get("STARDUST_POLICY_FILE_STAT", "stardust:400"))
     else:
         sys.exit(2)
 elif tool == "uuidgen":
@@ -211,6 +215,8 @@ elif tool == "systemctl":
         log.write(" ".join(args) + "\n")
     if args and args[0] == "is-active":
         sys.exit(1)
+    elif args and args[0] == "list-unit-files":
+        print(os.environ.get("STARDUST_SYSTEMD_UNIT_FILES", ""))
 elif tool == "systemd-analyze":
     pass
 else:
@@ -368,7 +374,19 @@ class InstallerRegressionTests(unittest.TestCase):
             check=False,
         )
 
-    def _run_linux_service_installer(self, name, *, account_mode="existing", existing_binary=None, **account):
+    def _run_linux_service_installer(
+        self,
+        name,
+        *,
+        account_mode="existing",
+        existing_binary=None,
+        extra_args=(),
+        systemd_unit_files="",
+        existing_policy=None,
+        policy_file_stat="stardust:400",
+        policy_dir_stat="root:stardust:750",
+        **account,
+    ):
         case_dir = self.root / name
         case_dir.mkdir()
         install_dir = case_dir / "usr" / "local" / "bin"
@@ -377,6 +395,17 @@ class InstallerRegressionTests(unittest.TestCase):
             (install_dir / "stardust").write_bytes(existing_binary)
         unit_path = case_dir / "etc" / "systemd" / "system" / "stardust.service"
         unit_path.parent.mkdir(parents=True)
+        service_unit = (REPO_ROOT / "deploy/systemd/stardust.service").read_text(encoding="utf-8")
+        (self.fixtures / "stardust.service").write_text(
+            service_unit.replace("/usr/local/bin", str(install_dir)),
+            encoding="utf-8",
+        )
+        policy_dir = case_dir / "etc" / "stardust"
+        if existing_policy is not None:
+            policy_dir.mkdir(parents=True)
+            policy_path = policy_dir / "services.json"
+            policy_path.write_text(existing_policy, encoding="utf-8")
+            policy_path.chmod(0o400)
         state = case_dir / "account-state"
         state.mkdir()
         account_log = case_dir / "account.log"
@@ -388,6 +417,7 @@ class InstallerRegressionTests(unittest.TestCase):
         script = script.replace(root_check, "\t\t:\n", 1)
         script = script.replace("/usr/local/bin", str(install_dir))
         script = script.replace("/etc/systemd/system/stardust.service", str(unit_path))
+        script = script.replace("/etc/stardust", str(policy_dir))
         test_installer = case_dir / "install.sh"
         test_installer.write_text(script)
         test_installer.chmod(0o755)
@@ -403,11 +433,14 @@ class InstallerRegressionTests(unittest.TestCase):
             "STARDUST_USER_HOME": "/nonexistent",
             "STARDUST_USER_SHELL": "/usr/sbin/nologin",
             "STARDUST_GROUP_IDS": "700",
+            "STARDUST_SYSTEMD_UNIT_FILES": systemd_unit_files,
+            "STARDUST_POLICY_FILE_STAT": policy_file_stat,
+            "STARDUST_POLICY_DIR_STAT": policy_dir_stat,
         }
         account_env.update(account)
         env = self._env("Linux", "x86_64", **account_env)
         result = subprocess.run(
-            ["bash", str(test_installer), "--version", "v1.2.3"],
+            ["bash", str(test_installer), "--version", "v1.2.3", *extra_args],
             cwd=REPO_ROOT,
             env=env,
             capture_output=True,
@@ -794,6 +827,104 @@ class InstallerRegressionTests(unittest.TestCase):
         unit = unit_path.read_text()
         self.assertIn("User=stardust", unit)
         self.assertIn("Group=stardust", unit)
+        self.assertNotIn("--service-policy-file", unit)
+        self.assertFalse((self.root / "new-service-account" / "etc" / "stardust" / "services.json").exists())
+
+    def test_linux_service_inventory_opt_in_creates_private_allowlist_for_present_common_units(self):
+        unit_files = """\
+ssh.service enabled enabled
+cron.service disabled enabled
+nginx.service enabled enabled
+custom-agent.service enabled enabled
+"""
+        case_name = "service-inventory-opt-in"
+        result, install_dir, unit_path, _, _ = self._run_linux_service_installer(
+            case_name,
+            extra_args=("--enable-service-inventory",),
+            systemd_unit_files=unit_files,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        policy_path = self.root / case_name / "etc" / "stardust" / "services.json"
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        self.assertEqual(policy["units"], ["ssh.service", "cron.service", "nginx.service"])
+        self.assertEqual(set(policy), {"token", "units"})
+        self.assertRegex(policy["token"], r"^[0-9a-f]{64}$")
+        self.assertEqual(policy_path.stat().st_mode & 0o777, 0o400)
+        self.assertNotIn(policy["token"], result.stdout + result.stderr)
+
+        unit = unit_path.read_text(encoding="utf-8")
+        self.assertIn(f"--service-policy-file={policy_path}", unit)
+        self.assertEqual((install_dir / "stardust").read_bytes(), self.assets[("linux", "amd64")][1])
+        install_commands = (self.root / "install.log").read_text(encoding="utf-8")
+        self.assertIn("-o stardust -g stardust -m 0400", install_commands)
+        ownership_commands = (self.root / "ownership.log").read_text(encoding="utf-8")
+        self.assertIn(f"chown root:stardust {policy_path.parent}", ownership_commands)
+        self.assertIn(f"chmod 0750 {policy_path.parent}", ownership_commands)
+        systemctl_commands = (self.root / "systemctl.log").read_text(encoding="utf-8")
+        self.assertIn("list-unit-files --type=service --no-legend --no-pager", systemctl_commands)
+        self.assertIn("start stardust.service", systemctl_commands)
+        self.assertIn("Enabled authenticated service inventory", result.stdout)
+
+    def test_linux_service_inventory_preserves_existing_policy_on_upgrade(self):
+        case_name = "service-inventory-existing-policy"
+        policy = {"token": "a" * 64, "units": ["custom.service"]}
+        content = json.dumps(policy)
+        result, _, unit_path, _, _ = self._run_linux_service_installer(
+            case_name,
+            existing_policy=content,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        policy_path = self.root / case_name / "etc" / "stardust" / "services.json"
+        self.assertEqual(policy_path.read_text(encoding="utf-8"), content)
+        self.assertIn(f"--service-policy-file={policy_path}", unit_path.read_text(encoding="utf-8"))
+        self.assertIn("Preserving and using the existing service inventory policy", result.stdout)
+        systemctl_commands = (self.root / "systemctl.log").read_text(encoding="utf-8")
+        self.assertNotIn("list-unit-files", systemctl_commands)
+
+    def test_linux_service_inventory_rejects_unsafe_existing_policy(self):
+        case_name = "service-inventory-unsafe-policy"
+        result, install_dir, _, _, _ = self._run_linux_service_installer(
+            case_name,
+            existing_binary=b"existing binary",
+            existing_policy=json.dumps({"token": "a" * 64, "units": ["custom.service"]}),
+            policy_file_stat="root:400",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("existing service policy must be owned by stardust", result.stderr)
+        self.assertEqual((install_dir / "stardust").read_bytes(), b"existing binary")
+        systemctl_commands = (self.root / "systemctl.log").read_text(encoding="utf-8")
+        self.assertFalse(any(command.startswith(("enable ", "start ")) for command in systemctl_commands.splitlines()))
+
+    def test_linux_service_inventory_fails_without_matching_preset_units(self):
+        case_name = "service-inventory-no-matches"
+        result, install_dir, _, _, _ = self._run_linux_service_installer(
+            case_name,
+            existing_binary=b"existing binary",
+            extra_args=("--enable-service-inventory",),
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("none of the common default services are installed", result.stderr)
+        self.assertEqual((install_dir / "stardust").read_bytes(), b"existing binary")
+        self.assertFalse((self.root / case_name / "etc" / "stardust" / "services.json").exists())
+        systemctl_commands = (self.root / "systemctl.log").read_text(encoding="utf-8")
+        self.assertFalse(any(command.startswith(("enable ", "start ")) for command in systemctl_commands.splitlines()))
+
+    def test_service_inventory_option_requires_linux_service_install(self):
+        result = subprocess.run(
+            ["bash", str(self.test_installer), "--enable-service-inventory", "--no-service"],
+            cwd=REPO_ROOT,
+            env=self._env(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires a Linux systemd service install", result.stderr)
+        self.assertFalse(self.curl_log.exists())
 
     def test_linux_service_install_accepts_a_safe_existing_account(self):
         result, _, _, state, account_log = self._run_linux_service_installer("safe-existing-account")

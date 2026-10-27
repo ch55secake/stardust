@@ -33,8 +33,23 @@ values. Each token must be 32–256 printable non-space ASCII characters. The
 policy file must be regular (not a symlink), owned by the daemon user (or root
 if the daemon runs as root), readable by the daemon, and mode **0400 or 0600**.
 Keep its parent directory protected from untrusted writes. Never put any token in
-process arguments, URLs, source control, or logs. The installer does not create
-this file or change permissions/groups; administrator setup is explicit.
+process arguments, URLs, source control, or logs. The installer leaves service
+inventory disabled by default. A Linux systemd install may opt in with
+`--enable-service-inventory`; when no policy already exists, it creates
+`/etc/stardust/services.json` with a new random read token and only the installed
+services from this preset:
+`sshd.service`, `ssh.service`, `cron.service`, `crond.service`,
+`systemd-resolved.service`, `systemd-networkd.service`, `NetworkManager.service`,
+`nginx.service`, `apache2.service`, `httpd.service`, `docker.service`,
+`containerd.service`, `mariadb.service`, `mysql.service`, and
+`postgresql.service`. If no preset unit is installed, setup fails rather than
+creating an empty policy. The generated policy is owned by `stardust`, mode 0400,
+under a root-owned 0750 directory; the installer never prints the token. Retrieve
+it securely as root to provision an authorized Orbit client. The generated
+policy contains only `token` and `units`; it does not enable journal access or
+restarts. On upgrades, an existing regular policy at this path is preserved and
+reused unchanged, including any separately configured capabilities; unsafe
+directory or file permissions fail closed.
 
 The inventory and log allowlists contain at most 128 exact `.service` names;
 the restart subset is limited to 32. Names may be template instances or aliases.

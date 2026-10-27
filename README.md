@@ -43,6 +43,21 @@ curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh
 
 To install a specific release, add `--version vX.Y.Z` to either command.
 
+Service inventory remains disabled by default. On Linux, opt in to a private
+read-only policy containing installed common server units with:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ch55secake/stardust/main/install.sh | sudo bash -s -- --enable-service-inventory
+```
+
+If no policy exists, the installer generates a separate service-read token and
+stores it in `/etc/stardust/services.json`; it does not print the token. Retrieve
+it as root and add it to Orbit's private service credential store. The generated
+preset only includes matching installed units and does not enable journal access
+or restarts. An existing policy is preserved and reused unchanged. See
+[`docs/services-api.md`](docs/services-api.md) for the exact preset and policy
+details.
+
 ## Build and run
 
 Requirements for building from source: Go 1.26.10 or newer.
@@ -228,11 +243,14 @@ and opt-in service restarts are documented in
 [`docs/services-api.md`](docs/services-api.md), including capability discovery,
 pagination, errors, and client credential handling. Inventory, logs, and
 restart operations are disabled by default. Inventory requires a private policy
-file with a read token and exact unit allowlist; logs require a distinct log-read
-token and independent unit allowlist. Restart requires a third credential, an
-exact unit subset, and a matching administrator-managed PolicyKit rule. Journal
-permission is never added by the installer. See [`docs/services-api.md`](docs/services-api.md)
-for setup and security details. Non-loopback listeners remain unsupported.
+file with a read token and exact unit allowlist; Linux installs can opt into the
+installer's common-service read-only preset with `--enable-service-inventory`.
+Logs require a distinct log-read token and independent unit allowlist. Restart
+requires a third credential, an exact unit subset, and a matching
+administrator-managed PolicyKit rule. The generated installer preset only
+enables inventory and does not add journal permissions; an existing policy is
+reused unchanged. See [`docs/services-api.md`](docs/services-api.md) for setup
+and security details. Non-loopback listeners remain unsupported.
 
 ### Installing the agent service
 
