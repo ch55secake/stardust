@@ -865,6 +865,21 @@ custom-agent.service enabled enabled
         self.assertIn("start stardust.service", systemctl_commands)
         self.assertIn("Enabled authenticated service inventory", result.stdout)
 
+    def test_linux_service_inventory_supports_install_dir_with_trailing_slash(self):
+        case_name = "service-inventory-trailing-install-dir-slash"
+        install_dir = self.root / case_name / "usr" / "local" / "bin"
+        result, _, unit_path, _, _ = self._run_linux_service_installer(
+            case_name,
+            extra_args=("--install-dir", f"{install_dir}/"),
+            systemd_unit_files="ssh.service enabled enabled\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            f"--service-policy-file={self.root / case_name / 'etc' / 'stardust' / 'services.json'}",
+            unit_path.read_text(encoding="utf-8"),
+        )
+
     def test_linux_service_inventory_preserves_existing_policy_on_upgrade(self):
         case_name = "service-inventory-existing-policy"
         policy = {"token": "a" * 64, "units": ["custom.service"]}

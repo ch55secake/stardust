@@ -161,7 +161,7 @@ prepare_linux_service_inventory() {
 	fi
 
 	configured_unit="${tmp_dir}/stardust.service.with-service-inventory"
-	expected_exec_start="ExecStart=${install_dir}/stardust --listen 127.0.0.1:8787"
+	expected_exec_start="ExecStart=${install_dir%/}/stardust --listen 127.0.0.1:8787"
 	awk -v policy="$service_policy_path" -v expected_start="$expected_exec_start" '
 		/^\[Service\]$/ { in_service = 1; print; next }
 		/^\[/ { in_service = 0 }
