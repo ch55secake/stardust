@@ -8,11 +8,12 @@ journal queries, and opt-in service restarts; it does **not** add arbitrary
 process control or launchd support. It does not invoke SSH commands; the existing
 SSH forward can still transport API traffic.
 
-## Explicit opt-in and read authorization
+## Policy configuration and read authorization
 
-Inventory and service logs are disabled by default. Start Stardust with
-`--service-policy-file=/path/to/services.json` to enable either capability. The
-JSON file contains:
+Inventory and service logs require a service policy at runtime. Linux systemd
+installs generate a narrow inventory policy by default (details below); to
+configure either capability manually, start Stardust with
+`--service-policy-file=/path/to/services.json`. The JSON file contains:
 
 ```json
 {
@@ -33,18 +34,19 @@ values. Each token must be 32–256 printable non-space ASCII characters. The
 policy file must be regular (not a symlink), owned by the daemon user (or root
 if the daemon runs as root), readable by the daemon, and mode **0400 or 0600**.
 Keep its parent directory protected from untrusted writes. Never put any token in
-process arguments, URLs, source control, or logs. The installer leaves service
-inventory disabled by default. A Linux systemd install may opt in with
-`--enable-service-inventory`; when no policy already exists, it creates
+process arguments, URLs, source control, or logs. Linux systemd installs create
+an inventory-only policy by default; use `--no-service-inventory` to disable
+that setup. When no policy already exists, the installer creates
 `/etc/stardust/services.json` with a new random read token and only the installed
 services from this preset:
 `sshd.service`, `ssh.service`, `cron.service`, `crond.service`,
 `systemd-resolved.service`, `systemd-networkd.service`, `NetworkManager.service`,
 `nginx.service`, `apache2.service`, `httpd.service`, `docker.service`,
 `containerd.service`, `mariadb.service`, `mysql.service`, and
-`postgresql.service`. If no preset unit is installed, setup fails rather than
-creating an empty policy. The generated policy is owned by `stardust`, mode 0400,
-under a root-owned 0750 directory; the installer never prints the token. Retrieve
+`postgresql.service`. If no preset unit is installed, the installer continues
+without creating a policy and inventory remains disabled. The generated policy
+is owned by `stardust`, mode 0400, under a root-owned 0750 directory; the
+installer never prints the token. Retrieve
 it securely as root to provision an authorized Orbit client. The generated
 policy contains only `token` and `units`; it does not enable journal access or
 restarts. On upgrades, an existing regular policy at this path is preserved and
